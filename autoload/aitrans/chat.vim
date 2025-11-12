@@ -54,6 +54,9 @@ function! s:notify(method, payload) abort
     echohl None
     return
   endif
+  if exists('*denops#plugin#load')
+    call denops#plugin#load('aitrans', {})
+  endif
   try
     call denops#notify('aitrans', a:method, [a:payload])
   catch /.*/

@@ -27,6 +27,7 @@ type ChatOpenOptions = {
   split?: SplitInput;
   range?: RangeTuple;
   source_bufnr?: number;
+  split_ratio?: number;
 };
 
 type BufferWindow = ChatSessionState["prompt"];
@@ -52,6 +53,7 @@ const isChatOpenPayload = is.ObjectOf({
   split: as.Optional(isSplitInput),
   range: as.Optional(isRangeTuple),
   source_bufnr: as.Optional(is.Number),
+  split_ratio: as.Optional(is.Number),
 }) satisfies Predicate<ChatOpenOptions>;
 
 export async function openChat(
@@ -66,6 +68,7 @@ export async function openChat(
     selection_lines: selectionLines ?? opts.selection_lines,
   });
   dispatch(chatActions.startSession(session));
+  dispatch(chatActions.setStreaming(false));
 }
 
 export async function closeChat(denops: Denops): Promise<void> {
@@ -73,6 +76,7 @@ export async function closeChat(denops: Denops): Promise<void> {
   if (current == null) {
     return;
   }
+  dispatch(chatActions.setStreaming(false));
   archiveChatSession(current);
   dispatch(chatActions.endSession());
   if (current.layout_mode === "tab") {
@@ -112,6 +116,7 @@ export async function submitChat(
   }
   await buffer.modifiable(denops, prompt.bufnr, async () => {
     await fn.deletebufline(denops, prompt.bufnr, headerLines + 1, "$");
+    await fn.appendbufline(denops, prompt.bufnr, headerLines, [""]);
   });
   await fn.win_gotoid(denops, prompt.winid);
   await fn.win_execute(denops, prompt.winid, `normal! ${headerLines + 1}G0`);
@@ -280,10 +285,18 @@ export async function loadChatLog(
 }
 
 function ensureChatOpenOptions(payload: unknown): ChatOpenOptions {
+  const runtime = getRuntimeConfig();
+  const runtimeSplitRatio = typeof runtime?.chat?.split_ratio === "number"
+    ? runtime.chat.split_ratio
+    : undefined;
+  const configuredRatio = clampSplitRatio(runtimeSplitRatio);
   if (!isChatOpenPayload(payload)) {
-    return {};
+    return { split_ratio: configuredRatio };
   }
-  return { ...payload };
+  const ratio = clampSplitRatio(
+    payload.split_ratio ?? runtimeSplitRatio ?? configuredRatio,
+  );
+  return { ...payload, split_ratio: ratio };
 }
 
 function ensureFollowUpIndex(payload: unknown): number | null {
@@ -346,7 +359,7 @@ async function createSplitChatSession(
 ): Promise<ChatSessionState> {
   const originWinid = await fn.win_getid(denops) as number;
   const tabnr = await fn.tabpagenr(denops) as number;
-  const { responseWinid, promptWinid } = await openSplitWindows(denops, kind);
+  const { responseWinid, promptWinid } = await openSplitWindows(denops, kind, opts);
   const responseBufnr = await denops.call("nvim_create_buf", false, true) as number;
   const promptBufnr = await denops.call("nvim_create_buf", false, true) as number;
   await denops.call("nvim_win_set_buf", responseWinid, responseBufnr);
@@ -366,7 +379,9 @@ async function createSplitChatSession(
 async function openSplitWindows(
   denops: Denops,
   kind: "vertical" | "horizontal",
+  opts: ChatOpenOptions,
 ): Promise<{ responseWinid: number; promptWinid: number }> {
+  const ratio = clampSplitRatio(opts.split_ratio);
   if (kind === "vertical") {
     await denops.cmd("botright vsplit");
     const responseWinid = await fn.win_getid(denops) as number;
@@ -375,15 +390,20 @@ async function openSplitWindows(
     await denops.cmd(`vertical resize ${width}`);
     await denops.cmd("belowright split");
     const promptWinid = await fn.win_getid(denops) as number;
+    const lines = await denops.call("eval", "&lines") as number;
+    const promptHeight = Math.max(5, Math.floor(lines * (1 - ratio)));
+    await denops.call("nvim_win_set_height", promptWinid, promptHeight);
     return { responseWinid, promptWinid };
   }
   await denops.cmd("botright split");
   const responseWinid = await fn.win_getid(denops) as number;
   const lines = await denops.call("eval", "&lines") as number;
-  const height = Math.max(10, Math.floor(lines * 0.5));
-  await denops.cmd(`resize ${height}`);
+  const responseHeight = Math.max(5, Math.floor(lines * ratio));
+  const promptHeight = Math.max(5, lines - responseHeight - 2);
+  await denops.call("nvim_win_set_height", responseWinid, responseHeight);
   await denops.cmd("belowright split");
   const promptWinid = await fn.win_getid(denops) as number;
+  await denops.call("nvim_win_set_height", promptWinid, promptHeight);
   return { responseWinid, promptWinid };
 }
 
@@ -441,6 +461,7 @@ async function initializeChatBuffers(
     layout_mode,
     origin_winid: originWinid,
     messages: [],
+    streaming: false,
   };
 }
 
@@ -555,7 +576,6 @@ function buildPromptHeader(opts: ChatOpenOptions): string[] {
   header.push(`- Output: ${opts.out ?? "chat"}`);
   header.push("---");
   header.push("");
-  header.push("");
   return header;
 }
 
@@ -608,6 +628,7 @@ export async function createChatOutputSession(
   }
   const writer = createStreamingBuffer();
   const assistantEntry = await startAssistantEntry(denops, session);
+  dispatch(chatActions.setStreaming(true));
   return {
     mode: "chat",
     async append(text: string) {
@@ -621,11 +642,14 @@ export async function createChatOutputSession(
         role: "assistant",
         content: writer.getLines().join("\n"),
       }));
+      dispatch(chatActions.setStreaming(false));
     },
     async fail(reason: unknown) {
-      if (!reason) return;
-      writer.append(`\n> ${formatReason(reason)}`);
-      await updateAssistantEntry(denops, session, assistantEntry, writer.getLines());
+      if (reason) {
+        writer.append(`\n> ${formatReason(reason)}`);
+        await updateAssistantEntry(denops, session, assistantEntry, writer.getLines());
+      }
+      dispatch(chatActions.setStreaming(false));
     },
   };
 }
@@ -876,6 +900,9 @@ async function scrollResponseToEnd(
     "nvim_buf_line_count",
     session.response.bufnr,
   ) as number;
+  if (lineCount <= 0) {
+    return;
+  }
   await denops.call(
     "nvim_win_set_cursor",
     session.response.winid,
@@ -969,6 +996,13 @@ export async function resumeChat(
       await appendAssistantMessageToChat(denops, active, message.content, false);
     }
   }
+}
+
+function clampSplitRatio(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.min(0.95, Math.max(0.05, value));
+  }
+  return 0.66;
 }
 
 function formatReason(reason: unknown): string {

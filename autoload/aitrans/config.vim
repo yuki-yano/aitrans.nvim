@@ -1,24 +1,5 @@
 let s:null = v:null
 
-function! aitrans#config#sync() abort
-  if !exists('*denops#notify')
-    return v:false
-  endif
-
-  if exists('*denops#plugin#load')
-    call denops#plugin#load('aitrans', {})
-  endif
-
-  let l:payload = aitrans#config#collect()
-  try
-    call denops#notify('aitrans', 'updateConfig', [l:payload])
-    return v:true
-  catch /.*/
-    call s:notify_error('aitrans: updateConfig failed: ' . v:exception)
-    return v:false
-  endtry
-endfunction
-
 function! aitrans#config#collect() abort
   let l:config = {
         \ 'globals': s:collect_globals(),

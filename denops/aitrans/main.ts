@@ -169,10 +169,7 @@ async function handleApplyRequest(
   payload: unknown,
 ): Promise<JobSummary> {
   const callOpts = ensureApplyCallOptions(payload);
-  const runtime = store.getState().config.runtime;
-  if (!runtime) {
-    throw new Error("aitrans: runtime config is not available");
-  }
+  const runtime = await ensureRuntimeConfigAvailable(denops);
   const ctx = await buildContext(denops, callOpts);
   const template = findTemplateMetadata(runtime.templates ?? [], callOpts.template);
   const prompt = await resolvePromptBlock(denops, callOpts, ctx);
@@ -212,10 +209,7 @@ async function handleComposeOpen(
   denops: Denops,
   payload: unknown,
 ): Promise<ComposeSessionSummary> {
-  const runtime = store.getState().config.runtime;
-  if (!runtime) {
-    throw new Error("aitrans: runtime config is not available");
-  }
+  const runtime = await ensureRuntimeConfigAvailable(denops);
   const callOpts = ensureApplyCallOptions(payload);
   const ctx = await buildContext(denops, callOpts);
   const template = findTemplateMetadata(runtime.templates ?? [], callOpts.template);
@@ -282,13 +276,17 @@ async function handleComposeClose(denops: Denops): Promise<void> {
 async function handleChatSubmit(
   denops: Denops,
 ): Promise<JobSummary | null> {
-  const promptText = await submitChat(denops);
-  if (promptText == null) {
-    return null;
-  }
   const session = store.getState().chat.session;
   if (!session) {
     throw new Error("aitrans: chat session is not active");
+  }
+  if (session.streaming) {
+    await showWarning(denops, "aitrans: previous response is still streaming");
+    return null;
+  }
+  const promptText = await submitChat(denops);
+  if (promptText == null) {
+    return null;
   }
   await appendUserMessageToChat(denops, session, promptText);
   const payload: ApplyCallOptions = {
@@ -593,4 +591,22 @@ function normalizeScratchSplit(value: unknown): ScratchSplit {
     return value;
   }
   return "horizontal";
+}
+
+async function ensureRuntimeConfigAvailable(denops: Denops): Promise<RuntimeConfig> {
+  let runtime = store.getState().config.runtime;
+  if (runtime) {
+    return runtime;
+  }
+  const payload = await denops.call("aitrans#config#collect") as unknown;
+  runtime = ensureConfig(payload);
+  dispatch(configActions.setRuntimeConfig(runtime));
+  return runtime;
+}
+
+async function showWarning(denops: Denops, message: string): Promise<void> {
+  const escaped = message.replace(/'/g, "''");
+  await denops.cmd(
+    `echohl WarningMsg | echomsg '[aitrans] ${escaped}' | echohl None`,
+  );
 }

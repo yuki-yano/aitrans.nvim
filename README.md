@@ -27,6 +27,7 @@ vim.g.aitrans_chat = {
   log_dir = vim.fn.expand("~/.cache/vim/aitrans"),
   split = "vertical",      -- "vertical" | "horizontal" | "float"
   history_limit = 200,
+  split_ratio = 0.66,      -- Response window share (0.05 - 0.95)
 }
 
 vim.g.aitrans_compose = {
@@ -46,6 +47,8 @@ vim.g.aitrans_providers = {
 ```
 
 Call `denops#plugin#load('aitrans', {})` (or let your manager do it) after the globals are set so runtime config sync succeeds.
+
+- `split_ratio` controls how much of the editor height (or width, when using horizontal split) is reserved for the response pane. `0.66` matches ai-review.vim (roughly two thirds for responses, one third for the prompt).
 
 ---
 
@@ -136,6 +139,7 @@ xnoremap <silent> <leader>ar :<C-u>call aitrans#apply({
   ```
   Streaming updates only touch the most recent `## Assistant` block; cursor focus never leaves the prompt window, while the response window auto-scrolls.
 - Follow-up suggestions are **disabled by default**. A template must set `followup = { enabled = true }` (or you must pass `follow_up = true`) to show `[1]`–`[4]` shortcuts. No placeholder comments are emitted when disabled.
+- Split layout respects `g:aitrans_chat.split_ratio` (default `0.66`). The response pane gets roughly that share of the editor height (or width in horizontal layouts), while the prompt pane receives the remainder (minimum 5 lines).
 - Sessions auto-archive to Redux. Use:
   - `aitrans#chat#list()` → returns in-memory history (`[{id,template,provider,created_at,...}]`)
   - `aitrans#chat#resume({ 'id': '...' })` → rebuilds the split layout and replays `## You/Assistant` blocks

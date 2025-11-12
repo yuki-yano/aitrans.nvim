@@ -30,6 +30,7 @@ export type ChatSessionState = {
   layout_mode: "tab" | "split";
   origin_winid?: number;
   messages: ChatMessage[];
+  streaming: boolean;
 };
 
 export type ArchivedChat = {
@@ -76,6 +77,11 @@ export const chatSlice = createSlice({
     pushMessage(state, action: PayloadAction<ChatMessage>) {
       if (state.session) {
         state.session.messages.push(action.payload);
+      }
+    },
+    setStreaming(state, action: PayloadAction<boolean>) {
+      if (state.session) {
+        state.session.streaming = action.payload;
       }
     },
     archiveSession(state, action: PayloadAction<ArchivedChat>) {
