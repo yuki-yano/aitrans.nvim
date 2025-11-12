@@ -17,6 +17,9 @@ function! s:add_range(opts) abort
   if has_key(a:opts, 'range')
     return
   endif
+  if get(a:opts, 'source', '') ==# 'none'
+    return
+  endif
   if mode() =~# 'v'
     let l:start = line("'<")
     let l:end = line("'>")
@@ -29,6 +32,9 @@ endfunction
 
 function! s:inject_selection(opts) abort
   if has_key(a:opts, 'selection')
+    return
+  endif
+  if get(a:opts, 'source', '') ==# 'none'
     return
   endif
   if has_key(a:opts, 'range')

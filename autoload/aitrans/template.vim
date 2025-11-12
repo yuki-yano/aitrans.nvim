@@ -51,6 +51,24 @@ function! aitrans#template#execute(id_or_table, ctx, args) abort
   return call(l:Builder, [l:ctx, l:args])
 endfunction
 
+function! aitrans#template#run_callback(id, ctx) abort
+  if type(a:id) != v:t_string
+    return 0
+  endif
+  let l:def = aitrans#template#resolve(a:id)
+  let l:Callback = get(l:def, 'on_complete', v:null)
+  if type(l:Callback) != v:t_func
+    return 0
+  endif
+  try
+    call call(l:Callback, [deepcopy(a:ctx)])
+    return 1
+  catch /.*/
+    call s:notify_callback_error(a:id, v:exception)
+    return 0
+  endtry
+endfunction
+
 function! s:to_metadata(id, value) abort
   if type(a:value) != v:t_dict
     return { 'id': a:id }
@@ -61,4 +79,14 @@ function! s:to_metadata(id, value) abort
     call remove(l:meta, 'builder')
   endif
   return l:meta
+endfunction
+
+function! s:notify_callback_error(id, exception) abort
+  if has('nvim')
+    call luaeval('vim.notify(_A[1], vim.log.levels.WARN, { title = "aitrans" })', [printf('template "%s" on_complete failed: %s', a:id, a:exception)])
+    return
+  endif
+  echohl WarningMsg
+  echomsg printf('[aitrans] template "%s" on_complete failed: %s', a:id, a:exception)
+  echohl None
 endfunction

@@ -8,7 +8,7 @@ function! aitrans#apply(opts) range abort
   endif
   let l:opts = deepcopy(a:opts)
 
-  if exists('a:firstline') && exists('a:lastline')
+  if exists('a:firstline') && exists('a:lastline') && s:should_add_range(l:opts)
     if a:firstline > 0 && a:lastline >= a:firstline && !has_key(l:opts, 'range')
       let l:opts.range = [a:firstline, a:lastline]
       if !has_key(l:opts, 'source')
@@ -60,4 +60,8 @@ function! s:ensure_denops() abort
   if exists('*denops#plugin#load')
     call denops#plugin#load('aitrans', {})
   endif
+endfunction
+
+function! s:should_add_range(opts) abort
+  return get(a:opts, 'source', '') !=# 'none'
 endfunction

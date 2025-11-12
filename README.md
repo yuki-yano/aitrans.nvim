@@ -78,11 +78,28 @@ vim.g.aitrans_templates = {
 ]], text),
       }
     end,
+    on_complete = function(ctx)
+      vim.notify(string.format("Translated %d lines", #ctx.selection_lines), vim.log.levels.INFO, { title = "aitrans" })
+    end,
   },
 }
 ```
 
-`ctx` contains metadata (buffer/file info, selection text/lines, byte diagnostics, etc.). Builder results are automatically `trim()`’d before sending, so trailing blank lines will not leak into the provider call.
+`ctx` contains metadata (buffer/file info, selection text/lines, byte diagnostics, etc.). Builder results are automatically `trim()`’d before sending, so trailing blank lines will not leak into the provider call. The optional `on_complete` callback (Funcref or Lua function) runs after the response is successfully applied, receiving the same `ctx` table so you can log metrics, enqueue follow-up jobs, etc.
+
+Completion callbacks receive an extended context with both the original `source_ctx` and AI response metadata:
+
+```lua
+function(ctx)
+  -- ctx.template.id, ctx.provider, ctx.model
+  -- ctx.prompt / ctx.system / ctx.chat_history
+  -- ctx.response.text (final text) and ctx.response.chunks (streamed pieces)
+  -- ctx.target (e.g. { type = "replace", bufnr = 3, range = { ... } })
+  -- ctx.source_ctx (the same table passed to builder)
+end
+```
+
+Errors inside `on_complete` are surfaced as warnings but do not roll back the already-applied result.
 
 Use `:echo aitrans#template#list()` to inspect registered templates or hot reload by reassigning `vim.g.aitrans_templates`.
 
@@ -97,6 +114,13 @@ Use `:echo aitrans#template#list()` to inspect registered templates or hot reloa
 xnoremap <silent> <leader>ar :<C-u>call aitrans#apply({
       \ 'template': 'translate-to-ja',
       \ 'out': 'replace',
+      \})<CR>
+
+" Run a template without feeding the current buffer (source = 'none')
+nnoremap <silent> <leader>an :call aitrans#apply({
+      \ 'template': 'translate-to-ja',
+      \ 'source': 'none',
+      \ 'out': 'scratch',
       \})<CR>
 ```
 

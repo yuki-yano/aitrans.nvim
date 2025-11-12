@@ -19,7 +19,14 @@ import {
   type ApplyCallOptions as ContextOptions,
   type TemplateContext,
 } from "./core/context.ts";
-import { findTemplateMetadata, runTemplateBuilder } from "./core/template.ts";
+import {
+  findTemplateMetadata,
+  runTemplateBuilder,
+  runTemplateCallback,
+  buildTemplateCompletionContext,
+  type TemplateCompletionTarget,
+  type TemplateCompletionUsage,
+} from "./core/template.ts";
 import {
   createOutputSession,
   type OutputSession,
@@ -174,6 +181,7 @@ async function handleApplyRequest(
   const template = findTemplateMetadata(runtime.templates ?? [], callOpts.template);
   const prompt = await resolvePromptBlock(denops, callOpts, ctx);
   const execution = resolveExecutionPlan(callOpts, template, runtime);
+  const templateId = callOpts.template ?? template?.id ?? undefined;
   const finalOptions = ensureApplyOptions({
     prompt: prompt.prompt,
     system: callOpts.system_override ?? prompt.system,
@@ -195,14 +203,26 @@ async function handleApplyRequest(
     execution,
     callOpts,
   );
+  let chatSessionId: string | null | undefined = undefined;
   if (finalOptions.out === "chat") {
     await ensureChatPromptLogged(denops, finalOptions.prompt);
     const activeChat = store.getState().chat.session;
     if (activeChat) {
       finalOptions.chat_history = [...activeChat.messages];
+      chatSessionId = activeChat.id;
     }
   }
-  return await startApplyJob(denops, finalOptions, runtime, session);
+  return await startApplyJob(
+    denops,
+    finalOptions,
+    runtime,
+    session,
+    templateId,
+    template,
+    ctx,
+    execution,
+    chatSessionId,
+  );
 }
 
 async function handleComposeOpen(
@@ -319,6 +339,11 @@ async function startApplyJob(
   options: ApplyOptions,
   runtime: RuntimeConfig,
   session: JobOutputSession,
+  templateId: string | null | undefined,
+  templateMeta: TemplateMetadata | null,
+  templateContext: TemplateContext,
+  executionPlan: ExecutionPlan,
+  chatSessionId?: string | null,
 ): Promise<JobSummary> {
   const providerDef = runtime.providers[options.provider] ?? {};
   const model = options.model ?? providerDef.model;
@@ -357,6 +382,12 @@ async function startApplyJob(
       requestArgs,
       signal: controller.signal,
     },
+    templateId,
+    templateMeta,
+    templateContext,
+    applyOptions: options,
+    executionPlan,
+    chatSessionId,
   });
 
   return { id: jobId, status: record.status, out: options.out };
@@ -367,19 +398,72 @@ type RunJobOptions = {
   denops: Denops;
   session: JobOutputSession;
   providerOptions: Parameters<typeof executeProvider>[0];
+  templateId?: string | null;
+  templateMeta?: TemplateMetadata | null;
+  templateContext: TemplateContext;
+  applyOptions: ApplyOptions;
+  executionPlan: ExecutionPlan;
+  chatSessionId?: string | null;
 };
 
 function runJob(options: RunJobOptions): void {
-  const { job, denops, session, providerOptions } = options;
+  const {
+    job,
+    denops,
+    session,
+    providerOptions,
+    templateId,
+    templateMeta,
+    templateContext,
+    applyOptions,
+    executionPlan,
+    chatSessionId,
+  } = options;
   (async () => {
     try {
       job.status = "streaming";
+      const responseChunks: string[] = [];
+      let usage: TemplateCompletionUsage | undefined;
       for await (const chunk of executeProvider(providerOptions)) {
         if (chunk.text_delta) {
+          responseChunks.push(chunk.text_delta);
           await session.append(chunk.text_delta);
+        }
+        if (chunk.usage_partial) {
+          usage = {
+            input_tokens: chunk.usage_partial.input ?? usage?.input_tokens,
+            output_tokens: chunk.usage_partial.output ?? usage?.output_tokens,
+          };
         }
       }
       await session.finalize();
+      if (templateId) {
+        try {
+          const completionTarget = buildCompletionTarget(
+            applyOptions.out,
+            templateContext,
+            executionPlan,
+            chatSessionId,
+          );
+          const completionCtx = buildTemplateCompletionContext({
+            templateMeta,
+            templateId,
+            templateContext,
+            applyOptions,
+            responseChunks,
+            usage,
+            target: completionTarget,
+            completedAt: Date.now() / 1000,
+            jobId: job.id,
+          });
+          await runTemplateCallback(denops, templateId, completionCtx);
+        } catch (err) {
+          await logDebug(denops, "aitrans.template.callback.error", {
+            id: templateId,
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       job.status = "applied";
     } catch (err) {
       if (job.controller.signal.aborted) {
@@ -602,6 +686,39 @@ async function ensureRuntimeConfigAvailable(denops: Denops): Promise<RuntimeConf
   runtime = ensureConfig(payload);
   dispatch(configActions.setRuntimeConfig(runtime));
   return runtime;
+}
+
+function buildCompletionTarget(
+  out: OutputMode,
+  ctx: TemplateContext,
+  plan: ExecutionPlan,
+  chatSessionId?: string | null,
+): TemplateCompletionTarget {
+  switch (out) {
+    case "replace":
+      return {
+        type: "replace",
+        bufnr: ctx.bufnr,
+        range: { start: ctx.start_pos, end: ctx.end_pos },
+      };
+    case "append":
+      return {
+        type: "append",
+        bufnr: ctx.bufnr,
+        position: ctx.end_pos,
+      };
+    case "register":
+      return {
+        type: "register",
+        register: plan.register,
+      };
+    case "scratch":
+      return { type: "scratch" };
+    case "chat":
+      return { type: "chat", session_id: chatSessionId };
+    default:
+      return { type: "unknown" };
+  }
 }
 
 async function showWarning(denops: Denops, message: string): Promise<void> {

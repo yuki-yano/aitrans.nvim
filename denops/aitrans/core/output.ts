@@ -196,13 +196,20 @@ async function createScratchSession(
 ): Promise<OutputSession> {
   const split = splitMode ?? "horizontal";
   const { bufnr, winid } = await openScratchWindow(denops, split);
-  await configureScratchBuffer(denops, bufnr);
+  const headerLines = await configureScratchBuffer(denops, bufnr);
   const writer = createStreamingBuffer();
 
   async function rewrite(lines: string[]): Promise<void> {
     await buffer.modifiable(denops, bufnr, async () => {
-      await fn.deletebufline(denops, bufnr, 1, "$");
-      await fn.setbufline(denops, bufnr, 1, ["# Aitrans Scratch", "", ...lines]);
+      const body = lines.length > 0 ? [...lines] : [""];
+      await denops.call(
+        "nvim_buf_set_lines",
+        bufnr,
+        headerLines,
+        -1,
+        true,
+        body,
+      );
     });
   }
 
@@ -265,14 +272,24 @@ async function openScratchWindow(
   return { bufnr, winid };
 }
 
-async function configureScratchBuffer(denops: Denops, bufnr: number) {
+async function configureScratchBuffer(denops: Denops, bufnr: number): Promise<number> {
   await fn.setbufvar(denops, bufnr, "&buftype", "nofile");
   await fn.setbufvar(denops, bufnr, "&bufhidden", "wipe");
   await fn.setbufvar(denops, bufnr, "&swapfile", 0);
   await fn.setbufvar(denops, bufnr, "&filetype", "aitrans-scratch.markdown");
   await fn.setbufvar(denops, bufnr, "&modifiable", 1);
   await fn.setbufvar(denops, bufnr, "&readonly", 0);
-  await fn.setbufline(denops, bufnr, 1, ["# Aitrans Scratch", ""]);
+  const header = ["# Aitrans Scratch", ""];
+  await fn.setbufline(denops, bufnr, 1, header);
+  await denops.call(
+    "nvim_buf_set_keymap",
+    bufnr,
+    "n",
+    "q",
+    "<Cmd>close<CR>",
+    { noremap: true, silent: true },
+  );
+  return header.length;
 }
 
 function splitText(text: string): string[] {

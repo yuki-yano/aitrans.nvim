@@ -3,7 +3,7 @@ import { Denops, fn } from "../deps/denops.ts";
 export type Position = { row: number; col: number };
 
 export type SelectionInfo = {
-  source: "selection" | "line" | "buffer";
+  source: "selection" | "line" | "buffer" | "none";
   text: string;
   lines: string[];
   start: Position;
@@ -82,6 +82,17 @@ async function resolveSelection(
   }
 
   const requestedSource = normalizeSource(opts.source);
+  if (requestedSource === "none") {
+    const row = await fn.line(denops, ".") as number;
+    const col = await fn.col(denops, ".") as number;
+    return {
+      source: "none",
+      text: "",
+      lines: [],
+      start: { row, col },
+      end: { row, col },
+    };
+  }
   const range = await resolveRangeInfo(denops, bufnr, opts.range, requestedSource);
   if (range) {
     const lines = await fn.getbufline(denops, bufnr, range.startRow, range.endRow) as string[];
@@ -221,5 +232,6 @@ async function lineEndColumn(denops: Denops, row: number): Promise<number> {
 function normalizeSource(value?: string): SelectionInfo["source"] {
   if (value === "buffer") return "buffer";
   if (value === "line") return "line";
+  if (value === "none") return "none";
   return "selection";
 }
