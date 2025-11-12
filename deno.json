@@ -1,0 +1,6 @@
+{
+  "lock": false,
+  "fmt": {
+    "exclude": ["**/*.md", "**/*.json"]
+  }
+}
