@@ -476,12 +476,7 @@ function buildCliIterator(
   const chatContext = args.options.out === "chat"
     ? getActiveProviderContext()
     : null;
-  let finalArgs = applyProviderContextToArgs(
-    args.provider,
-    baseArgs,
-    chatContext,
-  );
-  let payload: CliPayload | undefined = buildCliPayload(
+  const payload: CliPayload = buildCliPayload(
     args.options,
     args.requestArgs,
   );
@@ -497,17 +492,12 @@ function buildCliIterator(
       });
     }
     : undefined;
-  if (args.provider === "codex-cli" && chatContext?.thread_id) {
-    const payloadJson = JSON.stringify(payload);
-    finalArgs = [
-      "exec",
-      "--json",
-      payloadJson,
-      "resume",
-      chatContext.thread_id,
-    ];
-    payload = undefined;
-  }
+  const cliArgs = buildCliCommandArgs({
+    provider: args.provider,
+    baseArgs,
+    payload,
+    context: chatContext,
+  });
   const hooks = args.options.out === "chat"
     ? {
       onThreadStarted: (threadId: string) => {
@@ -527,9 +517,8 @@ function buildCliIterator(
   return executeCliProvider({
     provider: args.provider,
     command,
-    args: finalArgs,
+    args: cliArgs,
     env,
-    payload,
     signal: args.controller.signal,
     timeoutMs,
     stopSignal: cliStopSignal(args.provider),
@@ -813,28 +802,7 @@ function resolveCliArgs(def: ProviderDefinition): string[] {
   if (Array.isArray(def.cli_args)) {
     return def.cli_args.map((entry) => String(entry));
   }
-  if (
-    Array.isArray(def.args) &&
-    def.args.every((entry) => typeof entry === "string")
-  ) {
-    return (def.args as string[]).map((entry) => String(entry));
-  }
   return [];
-}
-
-function applyProviderContextToArgs(
-  provider: CliProvider,
-  baseArgs: string[],
-  context: ReturnType<typeof getActiveProviderContext>,
-): string[] {
-  if (!context || context.provider !== provider) {
-    return baseArgs.slice();
-  }
-  const args = baseArgs.slice();
-  if (provider === "claude-cli" && context.session_id) {
-    args.push("--resume", context.session_id);
-  }
-  return args;
 }
 
 function buildCliPayload(
@@ -847,6 +815,51 @@ function buildCliPayload(
     chat_history: options.chat_history ?? [],
     request: requestArgs,
   };
+}
+
+type BuildCliArgsInput = {
+  provider: CliProvider;
+  baseArgs: string[];
+  payload: CliPayload;
+  context: ReturnType<typeof getActiveProviderContext>;
+};
+
+function buildCliCommandArgs(input: BuildCliArgsInput): string[] {
+  const args = [...input.baseArgs];
+  if (input.provider === "codex-cli") {
+    const body = JSON.stringify({
+      system: input.payload.system,
+      prompt: input.payload.prompt,
+      chat_history: input.payload.chat_history ?? [],
+      request: input.payload.request,
+    });
+    args.push("exec", "--json", body);
+    if (input.context?.thread_id) {
+      args.push("resume", input.context.thread_id);
+    }
+    return args;
+  }
+  const prompt = buildClaudePrompt(input.payload);
+  if (input.context?.session_id) {
+    args.push("--resume", input.context.session_id);
+  }
+  args.push(prompt);
+  return args;
+}
+
+function buildClaudePrompt(payload: CliPayload): string {
+  const segments: string[] = [];
+  const system = payload.system?.trim();
+  if (system) {
+    segments.push(`System: ${system}`);
+  }
+  const history = payload.chat_history ?? [];
+  for (const entry of history) {
+    const label = entry.role === "assistant" ? "Assistant" : "You";
+    segments.push(`${label}: ${entry.content}`);
+  }
+  segments.push(payload.prompt);
+  return segments.filter((segment) => segment.trim().length > 0).join("\n\n");
 }
 
 function buildCliEnv(

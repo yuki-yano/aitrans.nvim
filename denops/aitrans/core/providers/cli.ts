@@ -21,15 +21,12 @@ export type CliProviderOptions = {
   command: string;
   args: string[];
   env?: Record<string, string>;
-  payload?: CliPayload;
   signal?: AbortSignal;
   timeoutMs?: number;
   stopSignal: Deno.Signal;
   hooks?: CliProviderHooks;
   debugLog?: (event: unknown) => void;
 };
-
-const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 export function isCliProvider(value: string): value is CliProvider {
@@ -82,7 +79,6 @@ export async function* executeCliProvider(
 
   const stderrPromise = collectStream(child.stderr);
   try {
-    await writePayload(child.stdin, options.payload);
     const reader = child.stdout?.getReader();
     if (!reader) {
       throw new Error("aitrans: CLI stdout is not available");
@@ -140,25 +136,6 @@ export async function* executeCliProvider(
       clearTimeout(timeoutId);
     }
     options.signal?.removeEventListener("abort", abortHandler);
-  }
-}
-
-async function writePayload(
-  stdin: WritableStream<Uint8Array> | null | undefined,
-  payload?: CliPayload,
-): Promise<void> {
-  if (!stdin) {
-    return;
-  }
-  const writer = stdin.getWriter();
-  try {
-    if (payload) {
-      const body = JSON.stringify(payload);
-      await writer.write(encoder.encode(body));
-      await writer.write(encoder.encode("\n"));
-    }
-  } finally {
-    await writer.close();
   }
 }
 
