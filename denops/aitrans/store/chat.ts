@@ -31,6 +31,7 @@ export type ChatSessionState = {
   origin_winid?: number;
   messages: ChatMessage[];
   streaming: boolean;
+  providerContext?: ProviderContext;
 };
 
 export type ArchivedChat = {
@@ -40,6 +41,13 @@ export type ArchivedChat = {
   followUpEnabled: boolean;
   createdAt: string;
   messages: ChatMessage[];
+  providerContext?: ProviderContext;
+};
+
+export type ProviderContext = {
+  provider: string;
+  thread_id?: string;
+  session_id?: string;
 };
 
 export type ChatState = {
@@ -84,8 +92,26 @@ export const chatSlice = createSlice({
         state.session.streaming = action.payload;
       }
     },
+    setProviderContext(state, action: PayloadAction<ProviderContext | null>) {
+      if (state.session && action.payload) {
+        if (
+          state.session.provider &&
+          state.session.provider !== action.payload.provider
+        ) {
+          return;
+        }
+        state.session.providerContext = {
+          ...(state.session.providerContext ??
+            { provider: action.payload.provider }),
+          ...action.payload,
+        };
+      }
+    },
     archiveSession(state, action: PayloadAction<ArchivedChat>) {
-      state.history = [action.payload, ...state.history].slice(0, HISTORY_LIMIT);
+      state.history = [action.payload, ...state.history].slice(
+        0,
+        HISTORY_LIMIT,
+      );
     },
   },
 });

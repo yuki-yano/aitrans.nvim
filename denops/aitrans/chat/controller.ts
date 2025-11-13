@@ -4,10 +4,11 @@ import { as, is, type Predicate } from "../deps/unknownutil.ts";
 import { sanitizeLogName } from "./log.ts";
 import { createStreamingBuffer } from "../core/stream_buffer.ts";
 import {
-  chatActions,
   type ArchivedChat,
+  chatActions,
   type ChatMessage,
   type ChatSessionState,
+  type ProviderContext,
 } from "../store/chat.ts";
 import { dispatch, store } from "../store/index.ts";
 
@@ -28,6 +29,7 @@ type ChatOpenOptions = {
   range?: RangeTuple;
   source_bufnr?: number;
   split_ratio?: number;
+  provider_context?: ProviderContext;
 };
 
 type BufferWindow = ChatSessionState["prompt"];
@@ -54,6 +56,13 @@ const isChatOpenPayload = is.ObjectOf({
   range: as.Optional(isRangeTuple),
   source_bufnr: as.Optional(is.Number),
   split_ratio: as.Optional(is.Number),
+  provider_context: as.Optional(
+    is.ObjectOf({
+      provider: is.String,
+      thread_id: as.Optional(is.String),
+      session_id: as.Optional(is.String),
+    }),
+  ),
 }) satisfies Predicate<ChatOpenOptions>;
 
 export async function openChat(
@@ -148,7 +157,11 @@ export async function applyFollowUp(
     );
   });
   await fn.win_gotoid(denops, current.prompt.winid);
-  await fn.win_execute(denops, current.prompt.winid, `normal! ${current.headerLines + 1}G0`);
+  await fn.win_execute(
+    denops,
+    current.prompt.winid,
+    `normal! ${current.headerLines + 1}G0`,
+  );
 }
 
 export async function appendUserMessageToChat(
@@ -196,6 +209,7 @@ type ChatLogRecord = {
   prompt_text: string;
   response_text: string;
   created_at: string;
+  provider_context?: ProviderContext;
 };
 
 type ChatLogSummary = {
@@ -259,6 +273,7 @@ export async function saveChatLog(
     prompt_text: promptText,
     response_text: responseText,
     created_at: timestamp,
+    provider_context: session.providerContext,
   };
   const jsonPath = join(logDir, `${baseName}.json`);
   const markdownPath = join(logDir, `${baseName}.md`);
@@ -279,6 +294,7 @@ export async function loadChatLog(
     follow_up: record.follow_up_enabled,
     selection_lines: record.prompt_text.split("\n"),
     initial_response_lines: record.response_text.split("\n"),
+    provider_context: record.provider_context,
   });
   dispatch(chatActions.startSession(session));
   dispatch(chatActions.setFollowups(record.followups ?? []));
@@ -317,7 +333,8 @@ async function createChatSession(
   if (splitKind === "tab") {
     return await createTabChatSession(denops, opts);
   }
-  return await createSplitChatSession(denops, splitKind, opts);
+  const originWinid = await resolveChatOriginWindow(denops, opts);
+  return await createSplitChatSession(denops, splitKind, opts, originWinid);
 }
 
 function resolveSplitKind(input?: SplitInput): SplitKind {
@@ -330,15 +347,81 @@ function resolveSplitKind(input?: SplitInput): SplitKind {
   return "vertical";
 }
 
+async function resolveChatOriginWindow(
+  denops: Denops,
+  opts: ChatOpenOptions,
+): Promise<number> {
+  const winid = await findWindowDisplayingBuffer(denops, opts.source_bufnr);
+  if (winid != null) {
+    return winid;
+  }
+  return await fn.win_getid(denops) as number;
+}
+
+async function findWindowDisplayingBuffer(
+  denops: Denops,
+  bufnr?: number,
+): Promise<number | null> {
+  if (typeof bufnr !== "number" || bufnr <= 0) {
+    return null;
+  }
+  const wins = await denops.call("nvim_list_wins") as number[];
+  for (const winid of wins) {
+    if (!await winExists(denops, winid)) {
+      continue;
+    }
+    if (!await isNormalWindow(denops, winid)) {
+      continue;
+    }
+    const winBufnr = await denops.call("winbufnr", winid) as number;
+    if (winBufnr === bufnr) {
+      return winid;
+    }
+  }
+  return null;
+}
+
+async function isNormalWindow(
+  denops: Denops,
+  winid: number,
+): Promise<boolean> {
+  try {
+    const config = await denops.call(
+      "nvim_win_get_config",
+      winid,
+    ) as Record<string, unknown>;
+    const relative = typeof config.relative === "string"
+      ? config.relative
+      : "";
+    return relative.length === 0;
+  } catch {
+    return false;
+  }
+}
+
 async function createTabChatSession(
   denops: Denops,
   opts: ChatOpenOptions,
 ): Promise<ChatSessionState> {
   await denops.cmd("tabnew");
   const tabnr = await fn.tabpagenr(denops) as number;
-  const { responseWinid, promptWinid } = await openSplitWindows(denops, "vertical");
-  const responseBufnr = await denops.call("nvim_create_buf", false, true) as number;
-  const promptBufnr = await denops.call("nvim_create_buf", false, true) as number;
+  const originWinid = await fn.win_getid(denops) as number;
+  const { responseWinid, promptWinid } = await openSplitWindows(
+    denops,
+    "vertical",
+    opts,
+    originWinid,
+  );
+  const responseBufnr = await denops.call(
+    "nvim_create_buf",
+    false,
+    true,
+  ) as number;
+  const promptBufnr = await denops.call(
+    "nvim_create_buf",
+    false,
+    true,
+  ) as number;
   await denops.call("nvim_win_set_buf", responseWinid, responseBufnr);
   await denops.call("nvim_win_set_buf", promptWinid, promptBufnr);
   return await initializeChatBuffers(denops, {
@@ -356,12 +439,25 @@ async function createSplitChatSession(
   denops: Denops,
   kind: "vertical" | "horizontal",
   opts: ChatOpenOptions,
+  originWinid: number,
 ): Promise<ChatSessionState> {
-  const originWinid = await fn.win_getid(denops) as number;
   const tabnr = await fn.tabpagenr(denops) as number;
-  const { responseWinid, promptWinid } = await openSplitWindows(denops, kind, opts);
-  const responseBufnr = await denops.call("nvim_create_buf", false, true) as number;
-  const promptBufnr = await denops.call("nvim_create_buf", false, true) as number;
+  const { responseWinid, promptWinid } = await openSplitWindows(
+    denops,
+    kind,
+    opts,
+    originWinid,
+  );
+  const responseBufnr = await denops.call(
+    "nvim_create_buf",
+    false,
+    true,
+  ) as number;
+  const promptBufnr = await denops.call(
+    "nvim_create_buf",
+    false,
+    true,
+  ) as number;
   await denops.call("nvim_win_set_buf", responseWinid, responseBufnr);
   await denops.call("nvim_win_set_buf", promptWinid, promptBufnr);
   return await initializeChatBuffers(denops, {
@@ -380,31 +476,94 @@ async function openSplitWindows(
   denops: Denops,
   kind: "vertical" | "horizontal",
   opts: ChatOpenOptions,
+  originWinid?: number,
 ): Promise<{ responseWinid: number; promptWinid: number }> {
+  const baseWinid = await resolveOriginWindow(denops, originWinid);
+  await fn.win_gotoid(denops, baseWinid);
   const ratio = clampSplitRatio(opts.split_ratio);
   if (kind === "vertical") {
-    await denops.cmd("botright vsplit");
-    const responseWinid = await fn.win_getid(denops) as number;
+    const beforeVsplit = await snapshotWindows(denops);
+    await denops.cmd("noautocmd keepalt botright vsplit");
+    const responseWinid = await detectNewWindow(denops, beforeVsplit) ??
+      await fn.win_getid(denops) as number;
     const columns = await denops.call("eval", "&columns") as number;
     const width = Math.max(40, Math.floor(columns * 0.42));
-    await denops.cmd(`vertical resize ${width}`);
-    await denops.cmd("belowright split");
-    const promptWinid = await fn.win_getid(denops) as number;
-    const lines = await denops.call("eval", "&lines") as number;
-    const promptHeight = Math.max(5, Math.floor(lines * (1 - ratio)));
-    await denops.call("nvim_win_set_height", promptWinid, promptHeight);
+    await denops.cmd(`noautocmd vertical resize ${width}`);
+    await fn.win_gotoid(denops, responseWinid);
+    const beforeSplit = await snapshotWindows(denops);
+    await denops.cmd("noautocmd keepalt belowright split");
+    const promptWinid = await detectNewWindow(denops, beforeSplit) ??
+      await fn.win_getid(denops) as number;
+    await balanceStackHeights(denops, responseWinid, promptWinid, ratio);
     return { responseWinid, promptWinid };
   }
-  await denops.cmd("botright split");
-  const responseWinid = await fn.win_getid(denops) as number;
-  const lines = await denops.call("eval", "&lines") as number;
-  const responseHeight = Math.max(5, Math.floor(lines * ratio));
-  const promptHeight = Math.max(5, lines - responseHeight - 2);
-  await denops.call("nvim_win_set_height", responseWinid, responseHeight);
-  await denops.cmd("belowright split");
-  const promptWinid = await fn.win_getid(denops) as number;
-  await denops.call("nvim_win_set_height", promptWinid, promptHeight);
+  const responseWinid = baseWinid;
+  const beforeSplit = await snapshotWindows(denops);
+  await denops.cmd("noautocmd keepalt botright split");
+  const promptWinid = await detectNewWindow(denops, beforeSplit) ??
+    await fn.win_getid(denops) as number;
+  await balanceStackHeights(denops, responseWinid, promptWinid, ratio);
   return { responseWinid, promptWinid };
+}
+
+async function snapshotWindows(denops: Denops): Promise<Set<number>> {
+  const wins = await denops.call("nvim_list_wins") as number[];
+  return new Set(wins);
+}
+
+async function detectNewWindow(
+  denops: Denops,
+  before: Set<number>,
+): Promise<number | null> {
+  const wins = await denops.call("nvim_list_wins") as number[];
+  for (const winid of wins) {
+    if (!before.has(winid) && await isNormalWindow(denops, winid)) {
+      return winid;
+    }
+  }
+  return null;
+}
+
+async function resolveOriginWindow(
+  denops: Denops,
+  winid?: number,
+): Promise<number> {
+  if (winid && await winExists(denops, winid)) {
+    return winid;
+  }
+  return await fn.win_getid(denops) as number;
+}
+
+async function balanceStackHeights(
+  denops: Denops,
+  responseWinid: number,
+  promptWinid: number,
+  ratio: number,
+): Promise<void> {
+  const responseHeight = await denops.call(
+    "nvim_win_get_height",
+    responseWinid,
+  ) as number;
+  const promptHeight = await denops.call(
+    "nvim_win_get_height",
+    promptWinid,
+  ) as number;
+  const totalHeight = Math.max(2, responseHeight + promptHeight);
+  const minPrompt = Math.min(5, Math.max(1, totalHeight - 1));
+  const minResponse = Math.min(5, Math.max(1, totalHeight - minPrompt));
+  const maxResponse = Math.max(minResponse, totalHeight - minPrompt);
+  let desiredResponse = Math.floor(totalHeight * ratio);
+  desiredResponse = Math.min(
+    maxResponse,
+    Math.max(minResponse, desiredResponse),
+  );
+  let desiredPrompt = totalHeight - desiredResponse;
+  if (desiredPrompt < minPrompt) {
+    desiredPrompt = minPrompt;
+    desiredResponse = Math.max(minResponse, totalHeight - desiredPrompt);
+  }
+  await denops.call("nvim_win_set_height", responseWinid, desiredResponse);
+  await denops.call("nvim_win_set_height", promptWinid, desiredPrompt);
 }
 
 type InitializeArgs = {
@@ -462,6 +621,8 @@ async function initializeChatBuffers(
     origin_winid: originWinid,
     messages: [],
     streaming: false,
+    providerContext: opts.provider_context ??
+      (opts.provider ? { provider: opts.provider } : undefined),
   };
 }
 
@@ -612,6 +773,15 @@ function getSession(): ChatSessionState | null {
   return store.getState().chat.session;
 }
 
+export function getActiveProviderContext(): ProviderContext | null {
+  const session = getSession();
+  return session?.providerContext ?? null;
+}
+
+export function updateChatProviderContext(context: ProviderContext): void {
+  dispatch(chatActions.setProviderContext(context));
+}
+
 export type ChatOutputSession = {
   mode: "chat";
   append(text: string): Promise<void>;
@@ -628,16 +798,35 @@ export async function createChatOutputSession(
   }
   const writer = createStreamingBuffer();
   const assistantEntry = await startAssistantEntry(denops, session);
+  let spinner = startAssistantSpinner(denops, session, assistantEntry);
   dispatch(chatActions.setStreaming(true));
   return {
     mode: "chat",
     async append(text: string) {
       if (!text) return;
+      if (spinner) {
+        await spinner.stop();
+        spinner = null;
+      }
       writer.append(text);
-      await updateAssistantEntry(denops, session, assistantEntry, writer.getLines());
+      await updateAssistantEntry(
+        denops,
+        session,
+        assistantEntry,
+        writer.getLines(),
+      );
     },
     async finalize() {
-      await updateAssistantEntry(denops, session, assistantEntry, writer.getLines());
+      if (spinner) {
+        await spinner.stop();
+        spinner = null;
+      }
+      await updateAssistantEntry(
+        denops,
+        session,
+        assistantEntry,
+        writer.getLines(),
+      );
       dispatch(chatActions.pushMessage({
         role: "assistant",
         content: writer.getLines().join("\n"),
@@ -645,9 +834,18 @@ export async function createChatOutputSession(
       dispatch(chatActions.setStreaming(false));
     },
     async fail(reason: unknown) {
+      if (spinner) {
+        await spinner.stop();
+        spinner = null;
+      }
       if (reason) {
         writer.append(`\n> ${formatReason(reason)}`);
-        await updateAssistantEntry(denops, session, assistantEntry, writer.getLines());
+        await updateAssistantEntry(
+          denops,
+          session,
+          assistantEntry,
+          writer.getLines(),
+        );
       }
       dispatch(chatActions.setStreaming(false));
     },
@@ -761,6 +959,17 @@ async function winExists(denops: Denops, winid: number): Promise<boolean> {
   }
 }
 
+async function bufferExists(denops: Denops, bufnr: number): Promise<boolean> {
+  if (!bufnr) {
+    return false;
+  }
+  try {
+    return await denops.call("nvim_buf_is_valid", bufnr) as boolean;
+  } catch {
+    return false;
+  }
+}
+
 async function closeWindowIfValid(
   denops: Denops,
   winid: number,
@@ -780,6 +989,24 @@ type AssistantEntryHandle = {
   contentLines: number;
 };
 
+type AssistantSpinnerHandle = {
+  stop(options?: { clear?: boolean }): Promise<void>;
+};
+
+const assistantSpinnerFrames = [
+  "⠋",
+  "⠙",
+  "⠹",
+  "⠸",
+  "⠼",
+  "⠴",
+  "⠦",
+  "⠧",
+  "⠇",
+  "⠏",
+];
+const assistantSpinnerIntervalMs = 100;
+
 const assistantNamespaceName = "aitrans-chat-assistant";
 let assistantNamespace: number | null = null;
 
@@ -788,6 +1015,9 @@ async function appendLinesToResponse(
   session: ChatSessionState,
   lines: string[],
 ): Promise<void> {
+  if (!await bufferExists(denops, session.response.bufnr)) {
+    return;
+  }
   await buffer.modifiable(denops, session.response.bufnr, async () => {
     let lineCount = await denops.call(
       "nvim_buf_line_count",
@@ -856,12 +1086,61 @@ async function startAssistantEntry(
   return { ns, markId, contentLines: 1 };
 }
 
+function startAssistantSpinner(
+  denops: Denops,
+  session: ChatSessionState,
+  entry: AssistantEntryHandle,
+): AssistantSpinnerHandle {
+  let active = true;
+  let frame = 0;
+  const loop = async () => {
+    while (active) {
+      if (!await bufferExists(denops, session.response.bufnr)) {
+        active = false;
+        break;
+      }
+      const glyph = assistantSpinnerFrames[frame % assistantSpinnerFrames.length];
+      frame = (frame + 1) % assistantSpinnerFrames.length;
+      try {
+        await updateAssistantEntry(denops, session, entry, [`${glyph} Loading...`]);
+      } catch (_err) {
+        // ignore update failures (window may be closing)
+      }
+      await sleep(assistantSpinnerIntervalMs);
+    }
+  };
+  const pending = loop();
+  return {
+    async stop(options?: { clear?: boolean }) {
+      if (!active) {
+        return;
+      }
+      active = false;
+      await pending.catch(() => {});
+      if (options?.clear !== false) {
+        try {
+          await updateAssistantEntry(denops, session, entry, [""]);
+        } catch (_err) {
+          // ignore
+        }
+      }
+    },
+  };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function updateAssistantEntry(
   denops: Denops,
   session: ChatSessionState,
   entry: AssistantEntryHandle,
   lines: string[],
 ): Promise<void> {
+  if (!await bufferExists(denops, session.response.bufnr)) {
+    return;
+  }
   const pos = await denops.call(
     "nvim_buf_get_extmark_by_id",
     session.response.bufnr,
@@ -903,11 +1182,16 @@ async function scrollResponseToEnd(
   if (lineCount <= 0) {
     return;
   }
-  await denops.call(
-    "nvim_win_set_cursor",
-    session.response.winid,
-    [Math.max(1, lineCount), 0],
-  );
+  const row = Math.max(1, lineCount);
+  try {
+    await denops.call(
+      "nvim_win_set_cursor",
+      session.response.winid,
+      [row, 0],
+    );
+  } catch (_err) {
+    // Ignore cases where the response window no longer exists or shrank.
+  }
 }
 
 function archiveChatSession(session: ChatSessionState): void {
@@ -921,6 +1205,7 @@ function archiveChatSession(session: ChatSessionState): void {
     followUpEnabled: session.followUpEnabled,
     createdAt: new Date().toISOString(),
     messages: [...session.messages],
+    providerContext: session.providerContext,
   };
   dispatch(chatActions.archiveSession(entry));
 }
@@ -964,6 +1249,7 @@ export async function resumeChat(
     template: target.template,
     provider: target.provider,
     follow_up: target.followUpEnabled,
+    provider_context: target.providerContext,
   });
   dispatch(chatActions.startSession(session));
   dispatch(chatActions.setMessages([...target.messages]));
@@ -981,7 +1267,12 @@ export async function resumeChat(
     );
   });
   await buffer.modifiable(denops, active.prompt.bufnr, async () => {
-    await fn.deletebufline(denops, active.prompt.bufnr, active.headerLines + 1, "$");
+    await fn.deletebufline(
+      denops,
+      active.prompt.bufnr,
+      active.headerLines + 1,
+      "$",
+    );
     await fn.appendbufline(
       denops,
       active.prompt.bufnr,
@@ -993,7 +1284,12 @@ export async function resumeChat(
     if (message.role === "user") {
       await appendUserMessageToChat(denops, active, message.content, false);
     } else {
-      await appendAssistantMessageToChat(denops, active, message.content, false);
+      await appendAssistantMessageToChat(
+        denops,
+        active,
+        message.content,
+        false,
+      );
     }
   }
 }

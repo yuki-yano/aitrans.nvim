@@ -1,29 +1,30 @@
 import type { Denops } from "./deps/denops.ts";
 import { is } from "./deps/unknownutil.ts";
 import {
+  type ApplyOptions,
   buildMessages,
   ensureApplyOptions,
-  resolveProviderKey,
-  type ApplyOptions,
   type OutputMode,
   type Provider,
+  resolveProviderKey,
 } from "./core/apply_options.ts";
 import {
   ensureConfig,
+  type FollowUpConfig,
+  type ProviderDefinition,
   type RuntimeConfig,
   type TemplateMetadata,
-  type FollowUpConfig,
 } from "./core/config.ts";
 import {
-  buildContext,
   type ApplyCallOptions as ContextOptions,
+  buildContext,
   type TemplateContext,
 } from "./core/context.ts";
 import {
+  buildTemplateCompletionContext,
   findTemplateMetadata,
   runTemplateBuilder,
   runTemplateCallback,
-  buildTemplateCompletionContext,
   type TemplateCompletionTarget,
   type TemplateCompletionUsage,
 } from "./core/template.ts";
@@ -33,12 +34,20 @@ import {
   type ScratchSplit,
 } from "./core/output.ts";
 import { executeProvider } from "./core/providers/index.ts";
-import { logDebug } from "./core/logger.ts";
 import {
+  type CliPayload,
+  type CliProvider,
+  executeCliProvider,
+  isCliProvider,
+} from "./core/providers/cli.ts";
+import { logDebug } from "./core/logger.ts";
+import type { NormalizedChunk } from "./stream/normalize.ts";
+import {
+  appendUserMessageToChat,
   applyFollowUp,
   closeChat,
   createChatOutputSession,
-  appendUserMessageToChat,
+  getActiveProviderContext,
   listChatHistory,
   listChatLogs,
   loadChatLog,
@@ -47,15 +56,16 @@ import {
   saveChatLog,
   setFollowUps,
   submitChat,
+  updateChatProviderContext,
 } from "./chat/controller.ts";
 import type { ChatOutputSession } from "./chat/controller.ts";
 import { configActions, dispatch, store } from "./store/index.ts";
 import {
   closeComposeEditor,
+  type ComposeEditorConfig,
   openComposeEditor,
   readComposeBody,
   resolveComposeConfig,
-  type ComposeEditorConfig,
 } from "./compose/controller.ts";
 import { buildComposeBodyLines } from "./compose/body.ts";
 
@@ -90,6 +100,7 @@ type ComposeCallState = {
   callOpts: ApplyCallOptions;
   systemPrompt?: string;
   config: ComposeEditorConfig;
+  origin_winid?: number;
 };
 
 const jobs = new Map<string, JobRecord>();
@@ -178,7 +189,10 @@ async function handleApplyRequest(
   const callOpts = ensureApplyCallOptions(payload);
   const runtime = await ensureRuntimeConfigAvailable(denops);
   const ctx = await buildContext(denops, callOpts);
-  const template = findTemplateMetadata(runtime.templates ?? [], callOpts.template);
+  const template = findTemplateMetadata(
+    runtime.templates ?? [],
+    callOpts.template,
+  );
   const prompt = await resolvePromptBlock(denops, callOpts, ctx);
   const execution = resolveExecutionPlan(callOpts, template, runtime);
   const templateId = callOpts.template ?? template?.id ?? undefined;
@@ -190,7 +204,7 @@ async function handleApplyRequest(
     out: execution.out,
     request_args_json: execution.requestArgs,
   });
-  await logDebug(denops, "aitrans.apply.plan", {
+  await logDebug("aitrans.apply.plan", {
     provider: execution.provider,
     out: execution.out,
   });
@@ -231,8 +245,12 @@ async function handleComposeOpen(
 ): Promise<ComposeSessionSummary> {
   const runtime = await ensureRuntimeConfigAvailable(denops);
   const callOpts = ensureApplyCallOptions(payload);
+  const originWinid = await denops.call("nvim_get_current_win") as number;
   const ctx = await buildContext(denops, callOpts);
-  const template = findTemplateMetadata(runtime.templates ?? [], callOpts.template);
+  const template = findTemplateMetadata(
+    runtime.templates ?? [],
+    callOpts.template,
+  );
   const execution = resolveExecutionPlan(callOpts, template, runtime);
   const prompt = await resolveComposePrompt(denops, callOpts, ctx);
   const config = resolveComposeConfig(runtime.compose);
@@ -262,6 +280,7 @@ async function handleComposeOpen(
     },
     systemPrompt: prompt.system,
     config,
+    origin_winid: originWinid,
   };
   return composeState.session!;
 }
@@ -272,20 +291,34 @@ async function handleComposeSubmit(
   if (!composeState) {
     throw new Error("aitrans: compose session is not active");
   }
+  const state = composeState;
   const prompt = await readComposeBody(denops);
   if (prompt.trim().length === 0) {
     throw new Error("aitrans: compose buffer is empty");
   }
   const payload: ApplyCallOptions = {
-    ...composeState.callOpts,
+    ...state.callOpts,
     prompt_override: prompt,
-    system_override: composeState.systemPrompt ?? composeState.callOpts.system_override,
+    system_override: state.systemPrompt ??
+      state.callOpts.system_override,
   };
-  const result = await handleApplyRequest(denops, payload);
-  if (composeState?.config.ui === "float") {
-    await handleComposeClose(denops);
+  const shouldClose = state.config.ui === "float";
+  const composeWinid = state.session?.winid;
+  await focusUsableWindow(denops, state.origin_winid);
+  try {
+    const result = await handleApplyRequest(denops, payload);
+    if (shouldClose) {
+      await handleComposeClose(denops);
+    } else if (composeWinid) {
+      await focusUsableWindow(denops, composeWinid);
+    }
+    return result;
+  } catch (err) {
+    if (!shouldClose && composeWinid) {
+      await focusUsableWindow(denops, composeWinid);
+    }
+    throw err;
   }
-  return result;
 }
 
 async function handleComposeClose(denops: Denops): Promise<void> {
@@ -346,14 +379,6 @@ async function startApplyJob(
   chatSessionId?: string | null,
 ): Promise<JobSummary> {
   const providerDef = runtime.providers[options.provider] ?? {};
-  const model = options.model ?? providerDef.model;
-  if (!model) {
-    throw new Error("aitrans: model is not specified");
-  }
-  const apiKey = resolveProviderKey(options.provider);
-  if (!apiKey) {
-    throw new Error(`aitrans: API key for ${options.provider} is not set`);
-  }
   const jobId = crypto.randomUUID();
   const controller = new AbortController();
   const record: JobRecord = {
@@ -362,26 +387,32 @@ async function startApplyJob(
     controller,
   };
   jobs.set(jobId, record);
-
-  const requestArgs = {
-    ...(providerDef.args ?? {}),
-    ...(options.request_args_json ?? {}),
-  };
-
-  const messages = buildMessages(options);
-
+  const requestArgs = mergeProviderRequestArgs(
+    providerDef,
+    options.request_args_json,
+  );
+  const chunkIterator = isCliProvider(options.provider)
+    ? buildCliIterator({
+      provider: options.provider,
+      providerDef,
+      options,
+      requestArgs,
+      controller,
+      runtime,
+      denops,
+    })
+    : buildApiIterator({
+      provider: options.provider,
+      providerDef,
+      options,
+      requestArgs,
+      controller,
+    });
   runJob({
     job: record,
     denops,
     session,
-    providerOptions: {
-      provider: options.provider,
-      apiKey,
-      model,
-      messages,
-      requestArgs,
-      signal: controller.signal,
-    },
+    chunkIterator,
     templateId,
     templateMeta,
     templateContext,
@@ -393,11 +424,124 @@ async function startApplyJob(
   return { id: jobId, status: record.status, out: options.out };
 }
 
+type ApiIteratorArgs = {
+  provider: Provider;
+  providerDef: ProviderDefinition;
+  options: ApplyOptions;
+  requestArgs: Record<string, unknown>;
+  controller: AbortController;
+};
+
+function buildApiIterator(
+  args: ApiIteratorArgs,
+): AsyncGenerator<NormalizedChunk> {
+  if (isCliProvider(args.provider)) {
+    throw new Error("aitrans: invalid provider configuration");
+  }
+  const model = args.options.model ?? args.providerDef.model;
+  if (!model) {
+    throw new Error("aitrans: model is not specified");
+  }
+  const apiKey = resolveProviderKey(args.provider);
+  if (!apiKey) {
+    throw new Error(`aitrans: API key for ${args.provider} is not set`);
+  }
+  const messages = buildMessages(args.options);
+  return executeProvider({
+    provider: args.provider,
+    apiKey,
+    model,
+    messages,
+    requestArgs: args.requestArgs,
+    signal: args.controller.signal,
+  });
+}
+
+type CliIteratorArgs = {
+  provider: CliProvider;
+  providerDef: ProviderDefinition;
+  options: ApplyOptions;
+  requestArgs: Record<string, unknown>;
+  controller: AbortController;
+  runtime: RuntimeConfig;
+  denops: Denops;
+};
+
+function buildCliIterator(
+  args: CliIteratorArgs,
+): AsyncGenerator<NormalizedChunk> {
+  const command = typeof args.providerDef.command === "string" &&
+      args.providerDef.command.length > 0
+    ? args.providerDef.command
+    : defaultCliCommand(args.provider);
+  const baseArgs = resolveCliArgs(args.providerDef);
+  const chatContext = args.options.out === "chat"
+    ? getActiveProviderContext()
+    : null;
+  let finalArgs = applyProviderContextToArgs(
+    args.provider,
+    baseArgs,
+    chatContext,
+  );
+  let payload = buildCliPayload(args.options, args.requestArgs);
+  const globalTimeout = asOptionalNumber(args.runtime.globals?.timeout_ms);
+  const timeoutMs = resolveCliTimeout(args.providerDef, globalTimeout);
+  const env = buildCliEnv(args.providerDef);
+  const debugEnabled = runtimeDebugEnabled(args.runtime);
+  const debugLog = debugEnabled
+    ? (event: unknown) => {
+          void logDebug("aitrans.cli.event", {
+        provider: args.provider,
+        event,
+      });
+    }
+    : undefined;
+  if (args.provider === "codex-cli" && chatContext?.thread_id) {
+    const payloadJson = JSON.stringify(payload);
+    finalArgs = [
+      "exec",
+      "--json",
+      payloadJson,
+      "resume",
+      chatContext.thread_id,
+    ];
+    payload = undefined;
+  }
+  const hooks = args.options.out === "chat"
+    ? {
+      onThreadStarted: (threadId: string) => {
+        updateChatProviderContext({
+          provider: args.provider,
+          thread_id: threadId,
+        });
+      },
+      onSessionId: (sessionId: string) => {
+        updateChatProviderContext({
+          provider: args.provider,
+          session_id: sessionId,
+        });
+      },
+    }
+    : undefined;
+  return executeCliProvider({
+    provider: args.provider,
+    command,
+    args: finalArgs,
+    env,
+    payload,
+    signal: args.controller.signal,
+    timeoutMs,
+    stopSignal: cliStopSignal(args.provider),
+    hooks,
+    debugLog,
+  });
+}
+
 type RunJobOptions = {
   job: JobRecord;
   denops: Denops;
   session: JobOutputSession;
-  providerOptions: Parameters<typeof executeProvider>[0];
+  chunkIterator: AsyncGenerator<NormalizedChunk>;
   templateId?: string | null;
   templateMeta?: TemplateMetadata | null;
   templateContext: TemplateContext;
@@ -411,7 +555,7 @@ function runJob(options: RunJobOptions): void {
     job,
     denops,
     session,
-    providerOptions,
+    chunkIterator,
     templateId,
     templateMeta,
     templateContext,
@@ -424,7 +568,7 @@ function runJob(options: RunJobOptions): void {
       job.status = "streaming";
       const responseChunks: string[] = [];
       let usage: TemplateCompletionUsage | undefined;
-      for await (const chunk of executeProvider(providerOptions)) {
+      for await (const chunk of chunkIterator) {
         if (chunk.text_delta) {
           responseChunks.push(chunk.text_delta);
           await session.append(chunk.text_delta);
@@ -458,7 +602,7 @@ function runJob(options: RunJobOptions): void {
           });
           await runTemplateCallback(denops, templateId, completionCtx);
         } catch (err) {
-          await logDebug(denops, "aitrans.template.callback.error", {
+          await logDebug("aitrans.template.callback.error", {
             id: templateId,
             message: err instanceof Error ? err.message : String(err),
           });
@@ -469,11 +613,11 @@ function runJob(options: RunJobOptions): void {
       if (job.controller.signal.aborted) {
         job.status = "stopped";
         await session.fail("Job stopped");
-        await logDebug(denops, "aitrans.apply.stopped", { id: job.id });
+        await logDebug("aitrans.apply.stopped", { id: job.id });
       } else {
         job.status = "error";
         await session.fail(err);
-        await logDebug(denops, "aitrans.apply.error", {
+        await logDebug("aitrans.apply.error", {
           id: job.id,
           message: err instanceof Error ? err.message : String(err),
         });
@@ -512,12 +656,18 @@ function ensureApplyCallOptions(payload: unknown): ApplyCallOptions {
     selection: asOptionalString(payload.selection),
     source: asOptionalString(payload.source),
     register: asOptionalString(payload.register),
-    range: isRangeTuple(payload.range) ? [payload.range[0], payload.range[1]] : undefined,
-    args: is.Record(payload.args) ? payload.args as Record<string, unknown> : undefined,
+    range: isRangeTuple(payload.range)
+      ? [payload.range[0], payload.range[1]]
+      : undefined,
+    args: is.Record(payload.args)
+      ? payload.args as Record<string, unknown>
+      : undefined,
     request_args_json: is.Record(payload.request_args_json)
       ? payload.request_args_json as Record<string, unknown>
       : undefined,
-    follow_up: typeof payload.follow_up === "boolean" ? payload.follow_up : undefined,
+    follow_up: typeof payload.follow_up === "boolean"
+      ? payload.follow_up
+      : undefined,
   };
 }
 
@@ -580,15 +730,18 @@ function resolveExecutionPlan(
   runtime: RuntimeConfig,
 ): ExecutionPlan {
   const provider = normalizeProvider(
-    opts.provider ?? template?.default_provider ?? firstProvider(runtime) ?? "openai",
+    opts.provider ?? template?.default_provider ?? firstProvider(runtime) ??
+      "openai",
   );
   const out = normalizeOut(opts.out ?? template?.default_out ?? "scratch");
   const requestArgs = deepMerge(
     template?.default_request_args_json ?? {},
     opts.request_args_json ?? {},
   );
-  const model = opts.model ?? template?.default_model ?? runtime.providers?.[provider]?.model;
-  const register = opts.register ?? asOptionalString(runtime.globals?.register) ?? '"';
+  const model = opts.model ?? template?.default_model ??
+    runtime.providers?.[provider]?.model;
+  const register = opts.register ??
+    asOptionalString(runtime.globals?.register) ?? '"';
   let followUpConfig: FollowUpConfig | null = null;
   if (typeof template?.follow_up === "boolean") {
     followUpConfig = { enabled: template.follow_up };
@@ -602,14 +755,23 @@ function resolveExecutionPlan(
 }
 
 function normalizeProvider(value: string): Provider {
-  if (value === "claude" || value === "gemini") {
+  if (
+    value === "openai" ||
+    value === "claude" ||
+    value === "gemini" ||
+    value === "codex-cli" ||
+    value === "claude-cli"
+  ) {
     return value;
   }
   return "openai";
 }
 
 function normalizeOut(value: string | undefined): OutputMode {
-  if (value === "replace" || value === "append" || value === "register" || value === "scratch" || value === "chat") {
+  if (
+    value === "replace" || value === "append" || value === "register" ||
+    value === "scratch" || value === "chat"
+  ) {
     return value;
   }
   return "scratch";
@@ -634,6 +796,97 @@ function deepMerge(
     }
   }
   return result;
+}
+
+function mergeProviderRequestArgs(
+  def: ProviderDefinition,
+  overrides?: Record<string, unknown>,
+): Record<string, unknown> {
+  const base = is.Record(def.args)
+    ? { ...(def.args as Record<string, unknown>) }
+    : {};
+  return { ...base, ...(overrides ?? {}) };
+}
+
+function resolveCliArgs(def: ProviderDefinition): string[] {
+  if (Array.isArray(def.cli_args)) {
+    return def.cli_args.map((entry) => String(entry));
+  }
+  if (
+    Array.isArray(def.args) &&
+    def.args.every((entry) => typeof entry === "string")
+  ) {
+    return (def.args as string[]).map((entry) => String(entry));
+  }
+  return [];
+}
+
+function applyProviderContextToArgs(
+  provider: CliProvider,
+  baseArgs: string[],
+  context: ReturnType<typeof getActiveProviderContext>,
+): string[] {
+  if (!context || context.provider !== provider) {
+    return baseArgs.slice();
+  }
+  const args = baseArgs.slice();
+  if (provider === "claude-cli" && context.session_id) {
+    args.push("--resume", context.session_id);
+  }
+  return args;
+}
+
+function buildCliPayload(
+  options: ApplyOptions,
+  requestArgs: Record<string, unknown>,
+): CliPayload {
+  return {
+    system: options.system,
+    prompt: options.prompt,
+    chat_history: options.chat_history ?? [],
+    request: requestArgs,
+  };
+}
+
+function buildCliEnv(
+  def: ProviderDefinition,
+): Record<string, string> | undefined {
+  if (!def.env) {
+    return undefined;
+  }
+  return { ...def.env };
+}
+
+function runtimeDebugEnabled(runtime: RuntimeConfig): boolean {
+  return runtime.globals?.debug === true;
+}
+
+function resolveCliTimeout(
+  def: ProviderDefinition,
+  globalTimeout?: number,
+): number | undefined {
+  if (
+    typeof def.timeout_ms === "number" && Number.isFinite(def.timeout_ms) &&
+    def.timeout_ms > 0
+  ) {
+    return def.timeout_ms;
+  }
+  return globalTimeout;
+}
+
+function defaultCliCommand(provider: CliProvider): string {
+  return provider === "codex-cli" ? "codex" : "claude";
+}
+
+function cliStopSignal(provider: CliProvider): Deno.Signal {
+  return provider === "codex-cli" ? "SIGINT" : "SIGTERM";
+}
+
+function asOptionalNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return value;
+  }
+  return undefined;
 }
 
 async function createSessionForOutput(
@@ -677,14 +930,15 @@ function normalizeScratchSplit(value: unknown): ScratchSplit {
   return "horizontal";
 }
 
-async function ensureRuntimeConfigAvailable(denops: Denops): Promise<RuntimeConfig> {
-  let runtime = store.getState().config.runtime;
-  if (runtime) {
-    return runtime;
-  }
+async function ensureRuntimeConfigAvailable(
+  denops: Denops,
+): Promise<RuntimeConfig> {
   const payload = await denops.call("aitrans#config#collect") as unknown;
-  runtime = ensureConfig(payload);
-  dispatch(configActions.setRuntimeConfig(runtime));
+  const runtime = ensureConfig(payload);
+  const current = store.getState().config.runtime;
+  if (!current || current.timestamp !== runtime.timestamp) {
+    dispatch(configActions.setRuntimeConfig(runtime));
+  }
   return runtime;
 }
 
@@ -726,4 +980,64 @@ async function showWarning(denops: Denops, message: string): Promise<void> {
   await denops.cmd(
     `echohl WarningMsg | echomsg '[aitrans] ${escaped}' | echohl None`,
   );
+}
+
+async function focusUsableWindow(
+  denops: Denops,
+  preferred?: number,
+): Promise<boolean> {
+  const target = await resolveUsableWindowId(denops, preferred);
+  if (target == null) {
+    return false;
+  }
+  await denops.call("nvim_set_current_win", target);
+  return true;
+}
+
+async function resolveUsableWindowId(
+  denops: Denops,
+  preferred?: number,
+): Promise<number | null> {
+  if (await isUsableWindow(denops, preferred)) {
+    return preferred as number;
+  }
+  const current = await denops.call("nvim_get_current_win") as number;
+  if (await isUsableWindow(denops, current)) {
+    return current;
+  }
+  const wins = await denops.call("nvim_list_wins") as number[];
+  for (const id of wins) {
+    if (await isUsableWindow(denops, id)) {
+      return id;
+    }
+  }
+  return null;
+}
+
+async function isUsableWindow(
+  denops: Denops,
+  winid?: number,
+): Promise<boolean> {
+  if (!winid) {
+    return false;
+  }
+  let valid = false;
+  try {
+    valid = await denops.call("nvim_win_is_valid", winid) as boolean;
+  } catch {
+    return false;
+  }
+  if (!valid) {
+    return false;
+  }
+  try {
+    const config = await denops.call(
+      "nvim_win_get_config",
+      winid,
+    ) as Record<string, unknown>;
+    const relative = typeof config.relative === "string" ? config.relative : "";
+    return relative.length === 0;
+  } catch {
+    return false;
+  }
 }

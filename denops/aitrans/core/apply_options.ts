@@ -1,6 +1,8 @@
 import { is } from "../deps/unknownutil.ts";
 
-export type Provider = "openai" | "claude" | "gemini";
+export type ApiProvider = "openai" | "claude" | "gemini";
+export type CliProvider = "codex-cli" | "claude-cli";
+export type Provider = ApiProvider | CliProvider;
 export type OutputMode = "replace" | "append" | "register" | "scratch" | "chat";
 
 export type ChatHistoryEntry = {
@@ -75,6 +77,9 @@ export function resolveProviderKey(provider: Provider): string | null {
       return Deno.env.get("ANTHROPIC_API_KEY") ?? null;
     case "gemini":
       return Deno.env.get("GEMINI_API_KEY") ?? Deno.env.get("GOOGLE_API_KEY") ?? null;
+    case "codex-cli":
+    case "claude-cli":
+      return null;
     default:
       return null;
   }
@@ -82,6 +87,9 @@ export function resolveProviderKey(provider: Provider): string | null {
 
 function normalizeProvider(value: unknown): Provider {
   if (value === "claude" || value === "gemini") {
+    return value;
+  }
+  if (value === "codex-cli" || value === "claude-cli") {
     return value;
   }
   return "openai";

@@ -43,12 +43,37 @@ vim.g.aitrans_providers = {
   claude = {
     model = "claude-3-5-sonnet-20240620",
   },
+  ["codex-cli"] = {
+    command = "codex",
+    cli_args = { "exec", "--json" },
+    env = { CODEX_TOKEN = os.getenv("CODEX_TOKEN") },
+    timeout_ms = 180000,
+  },
+  ["claude-cli"] = {
+    command = "claude",
+    cli_args = { "-p", "--output-format", "json" },
+    env = { ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY") },
+  },
 }
 ```
 
 Call `denops#plugin#load('aitrans', {})` (or let your manager do it) after the globals are set so runtime config sync succeeds.
 
 - `split_ratio` controls how much of the editor height (or width, when using horizontal split) is reserved for the response pane. `0.66` matches ai-review.vim (roughly two thirds for responses, one third for the prompt).
+- CLI provider entries (`*-cli`) run local executables via Deno.Command. `cli_args` must be a string array, `command` defaults to `codex`/`claude` if omitted, `env` merges into the child process environment, and `timeout_ms` overrides `g:aitrans_timeout_ms` per provider.
+
+### CLI Providers
+
+- **Codex CLI**
+  - First turn uses the configured `cli_args` (e.g. `codex exec --json`).
+  - When the response contains `thread_id`, subsequent chat turns automatically run `codex exec --json '<payload>' resume <thread_id>` so the conversation continues.
+- **Claude CLI**
+  - Initial call is whatever `cli_args` specifies (e.g. `claude -p --output-format json`).
+  - On chat continuation, `--resume <session_id>` is appended automatically; change the flag name by editing `cli_args` if needed.
+- Provider context (thread/session IDs) is stored in Redux and in saved chat logs, so `aitrans#chat#resume()` / `aitrans#chat#save()` / `aitrans#chat#load()` restores CLI sessions without extra input.
+- CLI output is parsed line-by-line as JSON. Lines that fail to parse are appended verbatim to the `## Assistant` block, giving you direct access to CLI warnings/errors.
+- Set `g:aitrans_debug = v:true` to log every CLI event (`[aitrans.cli.event] ...`) via `:messages`.
+- `timeout_ms` (per provider) and `aitrans#stop()` terminate hung CLI processes with `SIGINT` (codex) or `SIGTERM` (claude).
 
 ---
 

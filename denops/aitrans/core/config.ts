@@ -2,7 +2,11 @@ import { as, is, type Predicate } from "../deps/unknownutil.ts";
 
 export type ProviderDefinition = {
   model?: string;
-  args?: Record<string, unknown>;
+  args?: Record<string, unknown> | string[];
+  cli_args?: string[];
+  command?: string;
+  env?: Record<string, string>;
+  timeout_ms?: number;
 };
 
 export type FollowUpConfig = {
@@ -32,9 +36,20 @@ export type RuntimeConfig = {
 const isJsonRecord =
   ((value: unknown): value is Record<string, unknown> =>
     is.Record(value)) satisfies Predicate<Record<string, unknown>>;
+const isStringRecord: Predicate<Record<string, string>> = (
+  value: unknown,
+): value is Record<string, string> =>
+  is.Record(value) &&
+  Object.values(value).every((entry) => typeof entry === "string");
+const isStringArray: Predicate<string[]> = is.ArrayOf(is.String);
+
 const isProviderDefinitionInput = is.ObjectOf({
   model: as.Optional(is.String),
-  args: as.Optional(isJsonRecord),
+  args: as.Optional(is.UnionOf([isJsonRecord, isStringArray])),
+  cli_args: as.Optional(isStringArray),
+  command: as.Optional(is.String),
+  env: as.Optional(isStringRecord),
+  timeout_ms: as.Optional(is.Number),
 }) satisfies Predicate<ProviderDefinition>;
 const isTemplateMetadataInput = is.ObjectOf({
   id: is.String,
