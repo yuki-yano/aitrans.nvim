@@ -157,24 +157,23 @@ async function installComposeKeymaps(
   denops: Denops,
   _bufnr: number,
 ): Promise<void> {
-  const name = denops.name;
   await mapping.map(
     denops,
     "<CR>",
-    `<Cmd>call denops#notify("${name}", "composeSubmit", [])<CR>`,
+    `<Cmd>call aitrans#compose#submit()<CR>`,
     { buffer: true, noremap: true, silent: true, mode: ["n"] },
   );
   await mapping.map(
     denops,
     "q",
-    `<Cmd>call denops#notify("${name}", "composeClose", [])<CR>`,
+    `<Cmd>call aitrans#compose#close()<CR>`,
     { buffer: true, noremap: true, silent: true, mode: ["n"] },
   );
   await autocmd.define(
     denops,
     "BufWipeout",
     "<buffer>",
-    `<Cmd>call denops#notify("${name}", "composeClose", [])<CR>`,
+    `<Cmd>call aitrans#compose#close()<CR>`,
   );
 }
 

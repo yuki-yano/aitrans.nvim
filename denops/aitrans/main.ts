@@ -1,5 +1,14 @@
 import type { Denops } from "./deps/denops.ts";
 import { is } from "./deps/unknownutil.ts";
+import { focusUsableWindow } from "./utils/window.ts";
+import { asOptionalString } from "./utils/validation.ts";
+import type {
+  ExecutionPlan,
+  JobOutputSession,
+  JobSummary,
+} from "./jobs/types.ts";
+import { runJob } from "./jobs/runner.ts";
+import * as jobManager from "./jobs/manager.ts";
 import {
   type ApplyOptions,
   buildMessages,
@@ -9,36 +18,26 @@ import {
   resolveProviderKey,
 } from "./core/apply_options.ts";
 import {
-  ensureConfig,
-  normalizeChatPreset,
-  normalizeProviderPreset,
+  type ApiProviderName,
   type ApiProviderPreset,
   type ChatPreset,
   type CliProviderPreset,
+  ensureConfig,
   type FollowUpConfig,
+  normalizeChatPreset,
+  normalizeProviderPreset,
   type ProviderDefinition,
   type ProviderPreset,
   type RuntimeConfig,
   type TemplateMetadata,
 } from "./core/config.ts";
+import { buildContext, type TemplateContext } from "./core/context.ts";
 import {
-  type ApplyCallOptions as ContextOptions,
-  buildContext,
-  type TemplateContext,
-} from "./core/context.ts";
-import {
-  buildTemplateCompletionContext,
-  findTemplateMetadata,
-  runTemplateBuilder,
-  runTemplateCallback,
-  type TemplateCompletionTarget,
-  type TemplateCompletionUsage,
-} from "./core/template.ts";
-import {
-  createOutputSession,
-  type OutputSession,
-  type ScratchSplit,
-} from "./core/output.ts";
+  type ApplyCallOptions,
+  ensureApplyCallOptions,
+} from "./core/call_options.ts";
+import { findTemplateMetadata, runTemplateBuilder } from "./core/template.ts";
+import { createOutputSession, type ScratchSplit } from "./core/output.ts";
 import { executeProvider } from "./core/providers/index.ts";
 import {
   type CliPayload,
@@ -53,18 +52,19 @@ import {
   applyFollowUp,
   closeChat,
   createChatOutputSession,
-  getActiveProviderContext,
   listChatHistory,
   listChatLogs,
   loadChatLog,
   openChat,
   resumeChat,
   saveChatLog,
-  setFollowUps,
   submitChat,
-  updateChatProviderContext,
 } from "./chat/controller.ts";
-import type { ChatOutputSession } from "./chat/controller.ts";
+import {
+  getActiveProviderContext,
+  setFollowUps,
+  updateProviderContext as updateChatProviderContext,
+} from "./chat/session.ts";
 import { configActions, dispatch, store } from "./store/index.ts";
 import {
   closeComposeEditor,
@@ -74,28 +74,6 @@ import {
   resolveComposeConfig,
 } from "./compose/controller.ts";
 import { buildComposeBodyLines } from "./compose/body.ts";
-
-type JobStatus = "pending" | "streaming" | "applied" | "error" | "stopped";
-
-type JobRecord = {
-  id: string;
-  status: JobStatus;
-  controller: AbortController;
-};
-
-type JobOutputSession = OutputSession | ChatOutputSession;
-
-type ExecutionPlan = {
-  provider: Provider;
-  providerPreset: ProviderPreset;
-  model?: string;
-  out: OutputMode;
-  register: string;
-  requestArgs: Record<string, unknown>;
-  followUp: boolean;
-  chat: ChatPreset;
-  cliArgsOverride?: string[];
-};
 
 type ComposeSessionSummary = {
   id: string;
@@ -112,7 +90,6 @@ type ComposeCallState = {
   origin_winid?: number;
 };
 
-const jobs = new Map<string, JobRecord>();
 let composeState: ComposeCallState | null = null;
 
 export const main = (denops: Denops): void => {
@@ -133,8 +110,8 @@ export const main = (denops: Denops): void => {
     chatApplyFollowUp: async (payload?: unknown): Promise<void> => {
       await applyFollowUp(denops, payload);
     },
-    chatSetFollowUps: async (payload?: unknown): Promise<void> => {
-      await setFollowUps(denops, payload);
+    chatSetFollowUps: (payload?: unknown): void => {
+      setFollowUps(payload);
     },
     chatClose: async (): Promise<void> => {
       await closeChat(denops);
@@ -165,29 +142,9 @@ export const main = (denops: Denops): void => {
       return await handleApplyRequest(denops, payload);
     },
     stopJob: async (payload?: unknown): Promise<boolean> => {
-      return await stopJob(payload);
+      return await stopJobHandler(payload);
     },
   };
-};
-
-type JobSummary = {
-  id: string;
-  status: JobStatus;
-  out: string;
-};
-
-type ApplyCallOptions = ContextOptions & {
-  template?: string;
-  prompt_override?: string;
-  system_override?: string;
-  provider?: ProviderPreset;
-  model?: string;
-  out?: string;
-  register?: string;
-  args?: Record<string, unknown>;
-  request_args_json?: Record<string, unknown>;
-  follow_up?: boolean;
-  chat?: ChatPreset;
 };
 
 async function handleApplyRequest(
@@ -353,7 +310,7 @@ async function handleChatSubmit(
   await appendUserMessageToChat(denops, session, promptText);
   const payload: ApplyCallOptions = {
     template: session.template ?? undefined,
-    provider: session.provider ?? undefined,
+    provider: providerPresetFromName(session.provider),
     out: "chat",
     prompt_override: promptText,
     selection: promptText,
@@ -389,13 +346,7 @@ function startApplyJob(
 ): JobSummary {
   const providerDef = runtime.providers[options.provider] ?? {};
   const jobId = crypto.randomUUID();
-  const controller = new AbortController();
-  const record: JobRecord = {
-    id: jobId,
-    status: "pending",
-    controller,
-  };
-  jobs.set(jobId, record);
+  const record = jobManager.registerJob(jobId);
   const requestArgs = mergeProviderRequestArgs(
     providerDef,
     options.request_args_json,
@@ -406,7 +357,7 @@ function startApplyJob(
       providerDef,
       options,
       requestArgs,
-      controller,
+      controller: record.controller,
       runtime,
       denops,
       cliArgsOverride: executionPlan.cliArgsOverride,
@@ -416,7 +367,7 @@ function startApplyJob(
       providerDef,
       options,
       requestArgs,
-      controller,
+      controller: record.controller,
     });
   runJob({
     job: record,
@@ -548,153 +499,11 @@ function buildCliIterator(
   });
 }
 
-type RunJobOptions = {
-  job: JobRecord;
-  denops: Denops;
-  session: JobOutputSession;
-  chunkIterator: AsyncGenerator<NormalizedChunk>;
-  templateId?: string | null;
-  templateMeta?: TemplateMetadata | null;
-  templateContext: TemplateContext;
-  applyOptions: ApplyOptions;
-  executionPlan: ExecutionPlan;
-  chatSessionId?: string | null;
-};
-
-function runJob(options: RunJobOptions): void {
-  const {
-    job,
-    denops,
-    session,
-    chunkIterator,
-    templateId,
-    templateMeta,
-    templateContext,
-    applyOptions,
-    executionPlan,
-    chatSessionId,
-  } = options;
-  (async () => {
-    try {
-      job.status = "streaming";
-      const responseChunks: string[] = [];
-      let usage: TemplateCompletionUsage | undefined;
-      for await (const chunk of chunkIterator) {
-        if (chunk.text_delta) {
-          responseChunks.push(chunk.text_delta);
-          await session.append(chunk.text_delta);
-        }
-        if (chunk.usage_partial) {
-          usage = {
-            input_tokens: chunk.usage_partial.input ?? usage?.input_tokens,
-            output_tokens: chunk.usage_partial.output ?? usage?.output_tokens,
-          };
-        }
-      }
-      await session.finalize();
-      if (templateId) {
-        try {
-          const completionTarget = buildCompletionTarget(
-            applyOptions.out,
-            templateContext,
-            executionPlan,
-            chatSessionId,
-          );
-          const completionCtx = buildTemplateCompletionContext({
-            templateMeta,
-            templateId,
-            templateContext,
-            applyOptions,
-            responseChunks,
-            usage,
-            target: completionTarget,
-            completedAt: Date.now() / 1000,
-            jobId: job.id,
-          });
-          await runTemplateCallback(denops, templateId, completionCtx);
-        } catch (err) {
-          await logDebug("aitrans.template.callback.error", {
-            id: templateId,
-            message: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-      job.status = "applied";
-    } catch (err) {
-      if (job.controller.signal.aborted) {
-        job.status = "stopped";
-        await session.fail("Job stopped");
-        await logDebug("aitrans.apply.stopped", { id: job.id });
-      } else {
-        job.status = "error";
-        await session.fail(err);
-        await logDebug("aitrans.apply.error", {
-          id: job.id,
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
-    } finally {
-      jobs.set(job.id, job);
-    }
-  })();
-}
-
-function stopJob(payload: unknown): boolean {
+function stopJobHandler(payload: unknown): boolean {
   if (!is.Record(payload) || typeof payload.id !== "string") {
     return false;
   }
-  const job = jobs.get(payload.id);
-  if (!job) {
-    return false;
-  }
-  job.controller.abort();
-  job.status = "stopped";
-  jobs.set(job.id, job);
-  return true;
-}
-
-function ensureApplyCallOptions(payload: unknown): ApplyCallOptions {
-  if (!is.Record(payload)) {
-    return {};
-  }
-  let providerPreset: ProviderPreset | undefined;
-  if (payload.provider !== undefined) {
-    providerPreset = normalizeProviderPreset(payload.provider);
-  }
-  let chatPreset: ChatPreset | undefined;
-  if (payload.chat !== undefined) {
-    chatPreset = normalizeChatPreset(payload.chat);
-  }
-  return {
-    template: asOptionalString(payload.template),
-    prompt_override: asOptionalString(payload.prompt_override),
-    system_override: asOptionalString(payload.system_override),
-    provider: providerPreset,
-    model: asOptionalString(payload.model),
-    out: asOptionalString(payload.out),
-    selection: asOptionalString(payload.selection),
-    source: asOptionalString(payload.source),
-    register: asOptionalString(payload.register),
-    range: isRangeTuple(payload.range)
-      ? [payload.range[0], payload.range[1]]
-      : undefined,
-    args: is.Record(payload.args)
-      ? payload.args as Record<string, unknown>
-      : undefined,
-    request_args_json: is.Record(payload.request_args_json)
-      ? payload.request_args_json as Record<string, unknown>
-      : undefined,
-    follow_up: typeof payload.follow_up === "boolean"
-      ? payload.follow_up
-      : undefined,
-    chat: chatPreset,
-  };
-}
-
-const isRangeTuple = is.TupleOf([is.Number, is.Number]);
-
-function asOptionalString(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
+  return jobManager.stopJob(payload.id);
 }
 
 async function resolvePromptBlock(
@@ -800,6 +609,19 @@ function normalizeProvider(value: string): Provider {
     return value;
   }
   return "openai";
+}
+
+function providerPresetFromName(
+  value: string | undefined | null,
+): ProviderPreset | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const normalized = normalizeProvider(value);
+  if (isCliProviderName(normalized)) {
+    return { name: normalized };
+  }
+  return { name: normalized as ApiProviderName };
 }
 
 function normalizeOut(value: string | undefined): OutputMode {
@@ -1129,102 +951,9 @@ async function ensureRuntimeConfigAvailable(
   return runtime;
 }
 
-function buildCompletionTarget(
-  out: OutputMode,
-  ctx: TemplateContext,
-  plan: ExecutionPlan,
-  chatSessionId?: string | null,
-): TemplateCompletionTarget {
-  switch (out) {
-    case "replace":
-      return {
-        type: "replace",
-        bufnr: ctx.bufnr,
-        range: { start: ctx.start_pos, end: ctx.end_pos },
-      };
-    case "append":
-      return {
-        type: "append",
-        bufnr: ctx.bufnr,
-        position: ctx.end_pos,
-      };
-    case "register":
-      return {
-        type: "register",
-        register: plan.register,
-      };
-    case "scratch":
-      return { type: "scratch" };
-    case "chat":
-      return { type: "chat", session_id: chatSessionId };
-    default:
-      return { type: "unknown" };
-  }
-}
-
 async function showWarning(denops: Denops, message: string): Promise<void> {
   const escaped = message.replace(/'/g, "''");
   await denops.cmd(
     `echohl WarningMsg | echomsg '[aitrans] ${escaped}' | echohl None`,
   );
-}
-
-async function focusUsableWindow(
-  denops: Denops,
-  preferred?: number,
-): Promise<boolean> {
-  const target = await resolveUsableWindowId(denops, preferred);
-  if (target == null) {
-    return false;
-  }
-  await denops.call("nvim_set_current_win", target);
-  return true;
-}
-
-async function resolveUsableWindowId(
-  denops: Denops,
-  preferred?: number,
-): Promise<number | null> {
-  if (await isUsableWindow(denops, preferred)) {
-    return preferred as number;
-  }
-  const current = await denops.call("nvim_get_current_win") as number;
-  if (await isUsableWindow(denops, current)) {
-    return current;
-  }
-  const wins = await denops.call("nvim_list_wins") as number[];
-  for (const id of wins) {
-    if (await isUsableWindow(denops, id)) {
-      return id;
-    }
-  }
-  return null;
-}
-
-async function isUsableWindow(
-  denops: Denops,
-  winid?: number,
-): Promise<boolean> {
-  if (!winid) {
-    return false;
-  }
-  let valid = false;
-  try {
-    valid = await denops.call("nvim_win_is_valid", winid) as boolean;
-  } catch {
-    return false;
-  }
-  if (!valid) {
-    return false;
-  }
-  try {
-    const config = await denops.call(
-      "nvim_win_get_config",
-      winid,
-    ) as Record<string, unknown>;
-    const relative = typeof config.relative === "string" ? config.relative : "";
-    return relative.length === 0;
-  } catch {
-    return false;
-  }
 }

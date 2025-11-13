@@ -1,5 +1,4 @@
 function! aitrans#apply(opts) range abort
-  call s:ensure_denops()
   if type(a:opts) != v:t_dict
     throw 'aitrans: opts must be a Dictionary'
   endif
@@ -17,19 +16,16 @@ function! aitrans#apply(opts) range abort
     endif
   endif
 
-  return denops#request('aitrans', 'apply', [l:opts])
+  return aitrans#request('apply', [l:opts])
 endfunction
 
 function! aitrans#stop(...) abort
-  if !exists('*denops#request')
-    return v:false
-  endif
   let l:id = a:0 > 0 ? a:1 : v:null
   if type(l:id) != v:t_string || empty(l:id)
     return v:false
   endif
   try
-    call denops#request('aitrans', 'stopJob', [{ 'id': l:id }])
+    call aitrans#request('stopJob', [{ 'id': l:id }])
     return v:true
   catch /.*/
     return v:false
@@ -40,7 +36,6 @@ function! aitrans#compose(opts) range abort
   if type(a:opts) != v:t_dict
     throw 'aitrans: compose opts must be a Dictionary'
   endif
-  call s:ensure_denops()
   let l:opts = deepcopy(a:opts)
   if exists('a:firstline') && exists('a:lastline')
     if a:firstline > 0 && a:lastline >= a:firstline && !has_key(l:opts, 'range')
@@ -53,15 +48,31 @@ function! aitrans#compose(opts) range abort
   return aitrans#compose#open(l:opts)
 endfunction
 
-function! s:ensure_denops() abort
-  if !exists('*denops#request')
+function! s:should_add_range(opts) abort
+  return get(a:opts, 'source', '') !=# 'none'
+endfunction
+
+function! aitrans#request(method, args) abort
+  call s:ensure_plugin_ready()
+  return denops#request('aitrans', a:method, a:args)
+endfunction
+
+function! aitrans#notify(method, args) abort
+  call s:ensure_plugin_ready()
+  call denops#notify('aitrans', a:method, a:args)
+endfunction
+
+function! s:ensure_plugin_ready() abort
+  if !exists('*denops#plugin#wait')
     throw 'aitrans: Denops is not available'
   endif
   if exists('*denops#plugin#load')
     call denops#plugin#load('aitrans', {})
   endif
-endfunction
-
-function! s:should_add_range(opts) abort
-  return get(a:opts, 'source', '') !=# 'none'
+  try
+    call denops#plugin#wait('aitrans', { 'timeout': 1000 })
+  catch /denops: timeout/
+    throw 'aitrans: Plugin load timeout'
+  catch /.*/
+  endtry
 endfunction

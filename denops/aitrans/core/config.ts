@@ -72,13 +72,11 @@ const isApiProviderNameValue = (
 
 const isCliProviderNameValue = (
   value: unknown,
-): value is CliProviderName =>
-  value === "codex-cli" || value === "claude-cli";
+): value is CliProviderName => value === "codex-cli" || value === "claude-cli";
 
 const isChatSplitValue = (
   value: unknown,
-): value is "vertical" | "tab" =>
-  value === "vertical" || value === "tab";
+): value is "vertical" | "tab" => value === "vertical" || value === "tab";
 
 const isApiProviderPresetInput = is.ObjectOf({
   name: isApiProviderNameValue,
@@ -232,7 +230,9 @@ export function normalizeChatPreset(input: ChatPreset | unknown): ChatPreset {
   if (input.split === "vertical" || input.split === "tab") {
     preset.split = input.split;
   }
-  if (typeof input.split_ratio === "number" && Number.isFinite(input.split_ratio)) {
+  if (
+    typeof input.split_ratio === "number" && Number.isFinite(input.split_ratio)
+  ) {
     preset.split_ratio = input.split_ratio;
   }
   return preset;
