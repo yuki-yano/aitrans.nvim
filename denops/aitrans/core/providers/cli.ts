@@ -48,13 +48,13 @@ export async function* executeCliProvider(
       stderr: "piped",
       env: options.env,
     }).spawn();
-  } catch (err) {
-    if (err instanceof Deno.errors.NotFound) {
+  } catch (_err) {
+    if (_err instanceof Deno.errors.NotFound) {
       throw new Error(
         `aitrans: CLI command "${options.command}" was not found in PATH`,
       );
     }
-    throw err;
+    throw _err;
   }
 
   let timedOut = false;
@@ -191,7 +191,7 @@ function consumeCliLine(
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
-  } catch (err) {
+  } catch (_err) {
     return { text_delta: line };
   }
   options.debugLog?.(parsed);

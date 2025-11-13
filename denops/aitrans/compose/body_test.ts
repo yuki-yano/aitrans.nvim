@@ -29,7 +29,10 @@ Deno.test("buildComposeBodyLines returns prompt when provided", () => {
 });
 
 Deno.test("buildComposeBodyLines falls back to selection block when prompt empty", () => {
-  const ctx = createContext({ selection_lines: ["hello"], filetype: "markdown" });
+  const ctx = createContext({
+    selection_lines: ["hello"],
+    filetype: "markdown",
+  });
   const lines = buildComposeBodyLines("", ctx);
   assertEquals(lines, ["```markdown", "hello", "```"]);
 });

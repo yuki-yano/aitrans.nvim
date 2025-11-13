@@ -10,6 +10,10 @@ export type SelectionInfo = {
   end: Position;
 };
 
+export type TemplateDiagnostics = {
+  selection_bytes: number;
+};
+
 export type TemplateContext = {
   bufnr: number;
   cwd: string;
@@ -23,6 +27,7 @@ export type TemplateContext = {
   start_pos: Position;
   end_pos: Position;
   timestamp: number;
+  diagnostics?: TemplateDiagnostics;
 };
 
 export type ApplyCallOptions = {
@@ -49,6 +54,7 @@ export async function buildContext(
   const filename = await fn.expand(denops, "%:t") as string;
   const filetype = await fn.getbufvar(denops, bufnr, "&filetype") as string;
   const selection = await resolveSelection(denops, bufnr, opts);
+  const selection_bytes = new TextEncoder().encode(selection.text).length;
   return {
     bufnr,
     cwd,
@@ -58,10 +64,11 @@ export async function buildContext(
     source: selection.source,
     selection: selection.text,
     selection_lines: selection.lines,
-    selection_bytes: new TextEncoder().encode(selection.text).length,
+    selection_bytes,
     start_pos: selection.start,
     end_pos: selection.end,
     timestamp: Date.now() / 1000,
+    diagnostics: { selection_bytes },
   };
 }
 
@@ -93,9 +100,19 @@ async function resolveSelection(
       end: { row, col },
     };
   }
-  const range = await resolveRangeInfo(denops, bufnr, opts.range, requestedSource);
+  const range = await resolveRangeInfo(
+    denops,
+    bufnr,
+    opts.range,
+    requestedSource,
+  );
   if (range) {
-    const lines = await fn.getbufline(denops, bufnr, range.startRow, range.endRow) as string[];
+    const lines = await fn.getbufline(
+      denops,
+      bufnr,
+      range.startRow,
+      range.endRow,
+    ) as string[];
     const trimmed = trimLines(lines, range.startCol, range.endCol);
     return {
       source: range.source,
@@ -121,7 +138,7 @@ async function resolveSelection(
 
 async function resolveRangeInfo(
   denops: Denops,
-  bufnr: number,
+  _bufnr: number,
   explicit: [number, number] | undefined,
   requestedSource: SelectionInfo["source"],
 ): Promise<RangeInfo | null> {
@@ -149,7 +166,9 @@ async function resolveRangeInfo(
     };
   }
 
-  if (explicit && Number.isFinite(explicit[0]) && Number.isFinite(explicit[1])) {
+  if (
+    explicit && Number.isFinite(explicit[0]) && Number.isFinite(explicit[1])
+  ) {
     const startRow = Math.max(1, explicit[0]);
     const endRow = Math.max(startRow, explicit[1]);
     const endCol = await lineEndColumn(denops, endRow);
@@ -182,12 +201,19 @@ async function resolveRangeInfo(
   return null;
 }
 
-async function resolveVisualRange(denops: Denops): Promise<Omit<RangeInfo, "source"> | null> {
+async function resolveVisualRange(
+  denops: Denops,
+): Promise<Omit<RangeInfo, "source"> | null> {
   const mode = await fn.mode(denops) as string;
   if (!(mode.startsWith("v") || mode.startsWith("V") || mode === "\u0016")) {
     return null;
   }
-  const start = await fn.getpos(denops, "'<") as [number, number, number, number];
+  const start = await fn.getpos(denops, "'<") as [
+    number,
+    number,
+    number,
+    number,
+  ];
   const end = await fn.getpos(denops, "'>") as [number, number, number, number];
   const startRow = start[1];
   const startCol = Math.max(1, start[2]);
@@ -199,10 +225,19 @@ async function resolveVisualRange(denops: Denops): Promise<Omit<RangeInfo, "sour
   if (startRow < endRow || (startRow === endRow && startCol <= endCol)) {
     return { startRow, startCol, endRow, endCol };
   }
-  return { startRow: endRow, startCol: endCol, endRow: startRow, endCol: startCol };
+  return {
+    startRow: endRow,
+    startCol: endCol,
+    endRow: startRow,
+    endCol: startCol,
+  };
 }
 
-function trimLines(lines: string[], startCol: number, endCol: number): string[] {
+function trimLines(
+  lines: string[],
+  startCol: number,
+  endCol: number,
+): string[] {
   if (lines.length === 0) {
     return [""];
   }

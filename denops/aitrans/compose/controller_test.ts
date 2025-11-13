@@ -1,8 +1,8 @@
 import { assertEquals } from "../deps/testing.ts";
 import {
   buildComposeHeader,
-  resolveComposeConfig,
   type ComposeHeaderInfo,
+  resolveComposeConfig,
 } from "./controller.ts";
 
 Deno.test("buildComposeHeader constructs markdown header with blank separator", () => {

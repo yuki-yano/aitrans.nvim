@@ -155,7 +155,7 @@ async function configureComposeBuffer(
 
 async function installComposeKeymaps(
   denops: Denops,
-  bufnr: number,
+  _bufnr: number,
 ): Promise<void> {
   const name = denops.name;
   await mapping.map(

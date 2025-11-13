@@ -106,13 +106,13 @@ type ComposeCallState = {
 const jobs = new Map<string, JobRecord>();
 let composeState: ComposeCallState | null = null;
 
-export const main = async (denops: Denops): Promise<void> => {
+export const main = (denops: Denops): void => {
   denops.dispatcher = {
-    updateConfig: async (payload: unknown): Promise<void> => {
+    updateConfig: (payload: unknown): void => {
       const config = ensureConfig(payload);
       dispatch(configActions.setRuntimeConfig(config));
     },
-    currentConfig: async () => {
+    currentConfig: () => {
       return store.getState().config.runtime;
     },
     chatOpen: async (payload?: unknown): Promise<void> => {
@@ -130,9 +130,7 @@ export const main = async (denops: Denops): Promise<void> => {
     chatClose: async (): Promise<void> => {
       await closeChat(denops);
     },
-    chatListSessions: async (): Promise<Array<unknown>> => {
-      return listChatHistory();
-    },
+    chatListSessions: (): Array<unknown> => listChatHistory(),
     chatResume: async (payload?: unknown): Promise<void> => {
       await resumeChat(denops, payload);
     },
@@ -226,7 +224,7 @@ async function handleApplyRequest(
       chatSessionId = activeChat.id;
     }
   }
-  return await startApplyJob(
+  return startApplyJob(
     denops,
     finalOptions,
     runtime,
@@ -367,7 +365,7 @@ async function ensureChatPromptLogged(
   }
 }
 
-async function startApplyJob(
+function startApplyJob(
   denops: Denops,
   options: ApplyOptions,
   runtime: RuntimeConfig,
@@ -377,7 +375,7 @@ async function startApplyJob(
   templateContext: TemplateContext,
   executionPlan: ExecutionPlan,
   chatSessionId?: string | null,
-): Promise<JobSummary> {
+): JobSummary {
   const providerDef = runtime.providers[options.provider] ?? {};
   const jobId = crypto.randomUUID();
   const controller = new AbortController();
@@ -483,14 +481,17 @@ function buildCliIterator(
     baseArgs,
     chatContext,
   );
-  let payload = buildCliPayload(args.options, args.requestArgs);
+  let payload: CliPayload | undefined = buildCliPayload(
+    args.options,
+    args.requestArgs,
+  );
   const globalTimeout = asOptionalNumber(args.runtime.globals?.timeout_ms);
   const timeoutMs = resolveCliTimeout(args.providerDef, globalTimeout);
   const env = buildCliEnv(args.providerDef);
   const debugEnabled = runtimeDebugEnabled(args.runtime);
   const debugLog = debugEnabled
     ? (event: unknown) => {
-          void logDebug("aitrans.cli.event", {
+      void logDebug("aitrans.cli.event", {
         provider: args.provider,
         event,
       });
@@ -628,7 +629,7 @@ function runJob(options: RunJobOptions): void {
   })();
 }
 
-async function stopJob(payload: unknown): Promise<boolean> {
+function stopJob(payload: unknown): boolean {
   if (!is.Record(payload) || typeof payload.id !== "string") {
     return false;
   }

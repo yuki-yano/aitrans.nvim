@@ -1,6 +1,6 @@
 import { Denops } from "../deps/denops.ts";
 import { is } from "../deps/unknownutil.ts";
-import type { TemplateContext, Position } from "./context.ts";
+import type { Position, TemplateContext } from "./context.ts";
 import type { TemplateMetadata } from "./config.ts";
 import type {
   ApplyOptions,

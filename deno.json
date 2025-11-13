@@ -2,5 +2,13 @@
   "lock": false,
   "fmt": {
     "exclude": ["**/*.md", "**/*.json"]
+  },
+  "tasks": {
+    "format": "deno fmt",
+    "format:check": "deno fmt --check",
+    "typecheck": "deno check --allow-import denops/aitrans/main.ts",
+    "lint": "deno lint",
+    "test": "deno test --allow-import",
+    "ci": "deno task format:check && deno task typecheck && deno task lint && deno task test"
   }
 }

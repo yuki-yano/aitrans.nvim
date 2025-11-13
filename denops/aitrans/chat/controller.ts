@@ -3,10 +3,10 @@ import { join } from "../deps/std_path.ts";
 import { as, is, type Predicate } from "../deps/unknownutil.ts";
 import { sanitizeLogName } from "./log.ts";
 import { createStreamingBuffer } from "../core/stream_buffer.ts";
+import { normalizeFollowUps } from "./followup.ts";
 import {
   type ArchivedChat,
   chatActions,
-  type ChatMessage,
   type ChatSessionState,
   type ProviderContext,
 } from "../store/chat.ts";
@@ -192,10 +192,10 @@ export async function appendAssistantMessageToChat(
   await scrollResponseToEnd(denops, session);
 }
 
-export async function setFollowUps(
-  denops: Denops,
+export function setFollowUps(
+  _denops: Denops,
   payload: unknown,
-): Promise<void> {
+): void {
   const items = normalizeFollowUps(payload) as FollowUpItem[];
   dispatch(chatActions.setFollowups(items));
 }
@@ -390,9 +390,7 @@ async function isNormalWindow(
       "nvim_win_get_config",
       winid,
     ) as Record<string, unknown>;
-    const relative = typeof config.relative === "string"
-      ? config.relative
-      : "";
+    const relative = typeof config.relative === "string" ? config.relative : "";
     return relative.length === 0;
   } catch {
     return false;
@@ -664,7 +662,7 @@ async function configureResponseBuffer(
 
 async function installPromptKeymaps(
   denops: Denops,
-  bufnr: number,
+  _bufnr: number,
   followUpEnabled: boolean,
 ): Promise<void> {
   await mapping.map(
@@ -715,7 +713,7 @@ async function installPromptKeymaps(
 
 async function installResponseKeymaps(
   denops: Denops,
-  bufnr: number,
+  _bufnr: number,
 ): Promise<void> {
   await mapping.map(
     denops,
@@ -798,7 +796,11 @@ export async function createChatOutputSession(
   }
   const writer = createStreamingBuffer();
   const assistantEntry = await startAssistantEntry(denops, session);
-  let spinner = startAssistantSpinner(denops, session, assistantEntry);
+  let spinner: AssistantSpinnerHandle | null = startAssistantSpinner(
+    denops,
+    session,
+    assistantEntry,
+  );
   dispatch(chatActions.setStreaming(true));
   return {
     mode: "chat",
@@ -850,10 +852,6 @@ export async function createChatOutputSession(
       dispatch(chatActions.setStreaming(false));
     },
   };
-}
-
-async function renderFollowUps(): Promise<void> {
-  // Follow-up UI is disabled by default.
 }
 
 function getRuntimeConfig() {
@@ -1099,10 +1097,13 @@ function startAssistantSpinner(
         active = false;
         break;
       }
-      const glyph = assistantSpinnerFrames[frame % assistantSpinnerFrames.length];
+      const glyph =
+        assistantSpinnerFrames[frame % assistantSpinnerFrames.length];
       frame = (frame + 1) % assistantSpinnerFrames.length;
       try {
-        await updateAssistantEntry(denops, session, entry, [`${glyph} Loading...`]);
+        await updateAssistantEntry(denops, session, entry, [
+          `${glyph} Loading...`,
+        ]);
       } catch (_err) {
         // ignore update failures (window may be closing)
       }
@@ -1151,7 +1152,7 @@ async function updateAssistantEntry(
   if (!Array.isArray(pos) || pos.length < 2) {
     return;
   }
-  const headerRow = pos[0];
+  const headerRow = pos[0]!;
   const contentRow = headerRow + 1;
   const content = lines.length > 0 ? lines : [""];
   await buffer.modifiable(denops, session.response.bufnr, async () => {

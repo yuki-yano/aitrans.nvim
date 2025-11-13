@@ -15,7 +15,7 @@ export function normalizeFollowUps(payload: unknown): FollowUpEntry[] {
     return [];
   }
   const normalized: FollowUpEntry[] = [];
-  for (const [idx, entry] of payload.entries()) {
+  for (const [, entry] of payload.entries()) {
     if (!isFollowUpInput(entry)) {
       continue;
     }

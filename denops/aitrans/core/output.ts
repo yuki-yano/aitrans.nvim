@@ -39,7 +39,7 @@ export async function createOutputSession(
   }
 }
 
-async function createReplaceSession(
+function createReplaceSession(
   denops: Denops,
   ctx: TemplateContext,
 ): Promise<OutputSession> {
@@ -48,11 +48,12 @@ async function createReplaceSession(
   const startCol = Math.max(0, ctx.start_pos.col - 1);
   const endRow = ctx.end_pos.row - 1;
   const endCol = Math.max(0, ctx.end_pos.col);
-  return {
+  return Promise.resolve({
     mode: "replace",
-    async append(text) {
-      if (!text) return;
+    append(text) {
+      if (!text) return Promise.resolve();
       writer.append(text);
+      return Promise.resolve();
     },
     async finalize() {
       const lines = splitText(writer.getLines().join("\n"));
@@ -66,10 +67,10 @@ async function createReplaceSession(
         lines,
       );
     },
-    async fail() {
-      // no-op
+    fail() {
+      return Promise.resolve();
     },
-  };
+  });
 }
 
 async function createAppendSession(
@@ -171,21 +172,25 @@ async function createAppendSession(
   };
 }
 
-function createRegisterSession(denops: Denops, register?: string): OutputSession {
+function createRegisterSession(
+  denops: Denops,
+  register?: string,
+): OutputSession {
   const writer = createStreamingBuffer();
   const target = register && register.length > 0 ? register : '"';
   return {
     mode: "register",
-    async append(text) {
-      if (!text) return;
+    append(text) {
+      if (!text) return Promise.resolve();
       writer.append(text);
+      return Promise.resolve();
     },
     async finalize() {
       const text = writer.getLines().join("\n");
       await denops.call("setreg", target, text);
     },
-    async fail() {
-      // no-op
+    fail() {
+      return Promise.resolve();
     },
   };
 }
@@ -195,7 +200,7 @@ async function createScratchSession(
   splitMode?: ScratchSplit,
 ): Promise<OutputSession> {
   const split = splitMode ?? "horizontal";
-  const { bufnr, winid } = await openScratchWindow(denops, split);
+  const { bufnr } = await openScratchWindow(denops, split);
   const headerLines = await configureScratchBuffer(denops, bufnr);
   const writer = createStreamingBuffer();
 
@@ -253,8 +258,14 @@ async function openScratchWindow(
   }
   if (split === "float") {
     const bufnr = await denops.call("nvim_create_buf", true, true) as number;
-    const width = Math.max(40, Math.floor(((await fn.winwidth(denops, 0) as number) || 120) * 0.6));
-    const height = Math.max(10, Math.floor(((await fn.winheight(denops, 0) as number) || 40) * 0.6));
+    const width = Math.max(
+      40,
+      Math.floor(((await fn.winwidth(denops, 0) as number) || 120) * 0.6),
+    );
+    const height = Math.max(
+      10,
+      Math.floor(((await fn.winheight(denops, 0) as number) || 40) * 0.6),
+    );
     const winid = await denops.call("nvim_open_win", bufnr, true, {
       relative: "editor",
       row: 2,
@@ -272,7 +283,10 @@ async function openScratchWindow(
   return { bufnr, winid };
 }
 
-async function configureScratchBuffer(denops: Denops, bufnr: number): Promise<number> {
+async function configureScratchBuffer(
+  denops: Denops,
+  bufnr: number,
+): Promise<number> {
   await fn.setbufvar(denops, bufnr, "&buftype", "nofile");
   await fn.setbufvar(denops, bufnr, "&bufhidden", "wipe");
   await fn.setbufvar(denops, bufnr, "&swapfile", 0);
@@ -310,6 +324,9 @@ async function ensureNamespace(denops: Denops): Promise<number> {
   if (outputNamespace !== null) {
     return outputNamespace;
   }
-  outputNamespace = await denops.call("nvim_create_namespace", namespaceName) as number;
+  outputNamespace = await denops.call(
+    "nvim_create_namespace",
+    namespaceName,
+  ) as number;
   return outputNamespace;
 }

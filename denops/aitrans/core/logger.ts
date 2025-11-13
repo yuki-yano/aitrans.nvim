@@ -2,11 +2,11 @@ import { store } from "../store/index.ts";
 
 type LogLevel = "debug" | "info" | "warn" | "error";
 
-export async function logMessage(
+export function logMessage(
   level: LogLevel,
   message: string,
   meta?: Record<string, unknown>,
-): Promise<void> {
+): void {
   const runtime = store.getState().config.runtime;
   const debugEnabled = runtime?.globals?.debug === true;
   if (level === "debug" && !debugEnabled) {
@@ -16,9 +16,9 @@ export async function logMessage(
   console.log(`[${level.toUpperCase()}] ${payload}`);
 }
 
-export async function logDebug(
+export function logDebug(
   message: string,
   meta?: Record<string, unknown>,
-): Promise<void> {
-  await logMessage("debug", message, meta);
+): void {
+  logMessage("debug", message, meta);
 }

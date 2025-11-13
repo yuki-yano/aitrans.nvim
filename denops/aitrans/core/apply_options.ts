@@ -20,7 +20,10 @@ export type ApplyOptions = {
   chat_history?: ChatHistoryEntry[];
 };
 
-export type Message = { role: "system" | "user" | "assistant"; content: string };
+export type Message = {
+  role: "system" | "user" | "assistant";
+  content: string;
+};
 
 export function ensureApplyOptions(payload: unknown): ApplyOptions {
   if (!is.Record(payload) || typeof payload.prompt !== "string") {
@@ -76,7 +79,8 @@ export function resolveProviderKey(provider: Provider): string | null {
     case "claude":
       return Deno.env.get("ANTHROPIC_API_KEY") ?? null;
     case "gemini":
-      return Deno.env.get("GEMINI_API_KEY") ?? Deno.env.get("GOOGLE_API_KEY") ?? null;
+      return Deno.env.get("GEMINI_API_KEY") ?? Deno.env.get("GOOGLE_API_KEY") ??
+        null;
     case "codex-cli":
     case "claude-cli":
       return null;
@@ -96,11 +100,16 @@ function normalizeProvider(value: unknown): Provider {
 }
 
 function normalizeOut(value: unknown): OutputMode {
-  if (value === "replace" || value === "append" || value === "register" || value === "scratch" || value === "chat") {
+  if (
+    value === "replace" || value === "append" || value === "register" ||
+    value === "scratch" || value === "chat"
+  ) {
     return value;
   }
   if (value === undefined) {
     return "scratch";
   }
-  throw new Error(`aitrans: output mode "${String(value)}" is not implemented yet`);
+  throw new Error(
+    `aitrans: output mode "${String(value)}" is not implemented yet`,
+  );
 }
