@@ -1,10 +1,3 @@
-function! aitrans#chat#open(...) abort
-  let l:opts = a:0 > 0 && type(a:1) == v:t_dict ? deepcopy(a:1) : {}
-  call s:add_range(l:opts)
-  call s:inject_selection(l:opts)
-  call s:notify('chatOpen', l:opts)
-endfunction
-
 function! aitrans#chat#close() abort
   call s:notify('chatClose', {})
 endfunction
@@ -64,40 +57,4 @@ function! s:notify(method, payload) abort
     echomsg '[aitrans] ' . v:exception
     echohl None
   endtry
-endfunction
-
-function! s:add_range(opts) abort
-  if has_key(a:opts, 'range')
-    return
-  endif
-  if get(a:opts, 'source', '') ==# 'none'
-    return
-  endif
-  if mode() =~# 'v'
-    let l:start = line("'<")
-    let l:end = line("'>")
-    if l:start > 0 && l:end >= l:start
-      let a:opts.range = [l:start, l:end]
-      let a:opts.source_bufnr = bufnr('%')
-    endif
-  endif
-endfunction
-
-function! s:inject_selection(opts) abort
-  if has_key(a:opts, 'selection')
-    return
-  endif
-  if get(a:opts, 'source', '') ==# 'none'
-    return
-  endif
-  if has_key(a:opts, 'range')
-    let l:range = a:opts.range
-    if type(l:range) == v:t_list && len(l:range) == 2
-      let l:start = l:range[0]
-      let l:end = l:range[1]
-      if l:start > 0 && l:end >= l:start
-        let a:opts.selection = join(getline(l:start, l:end), "\n")
-      endif
-    endif
-  endif
 endfunction

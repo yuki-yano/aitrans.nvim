@@ -13,14 +13,36 @@ export type FollowUpConfig = {
   enabled?: boolean;
 };
 
+export type ApiProviderName = "openai" | "claude" | "gemini";
+export type CliProviderName = "codex-cli" | "claude-cli";
+
+export type ApiProviderPreset = {
+  name: ApiProviderName;
+  model?: string;
+  args?: Record<string, unknown>;
+};
+
+export type CliProviderPreset = {
+  name: CliProviderName;
+  cli_args?: string[];
+};
+
+export type ProviderPreset = ApiProviderPreset | CliProviderPreset;
+
+export type ChatPreset = {
+  split?: "vertical" | "tab";
+  split_ratio?: number;
+};
+
 export type TemplateMetadata = {
   id: string;
   title?: string;
   desc?: string;
   default_out?: string;
-  default_provider?: string;
+  default_provider?: ProviderPreset;
   default_model?: string;
   default_request_args_json?: Record<string, unknown>;
+  default_chat?: ChatPreset;
   follow_up?: boolean | FollowUpConfig;
 };
 
@@ -43,6 +65,42 @@ const isStringRecord: Predicate<Record<string, string>> = (
   Object.values(value).every((entry) => typeof entry === "string");
 const isStringArray: Predicate<string[]> = is.ArrayOf(is.String);
 
+const isApiProviderNameValue = (
+  value: unknown,
+): value is ApiProviderName =>
+  value === "openai" || value === "claude" || value === "gemini";
+
+const isCliProviderNameValue = (
+  value: unknown,
+): value is CliProviderName =>
+  value === "codex-cli" || value === "claude-cli";
+
+const isChatSplitValue = (
+  value: unknown,
+): value is "vertical" | "tab" =>
+  value === "vertical" || value === "tab";
+
+const isApiProviderPresetInput = is.ObjectOf({
+  name: isApiProviderNameValue,
+  model: as.Optional(is.String),
+  args: as.Optional(isJsonRecord),
+}) satisfies Predicate<ApiProviderPreset>;
+
+const isCliProviderPresetInput = is.ObjectOf({
+  name: isCliProviderNameValue,
+  cli_args: as.Optional(isStringArray),
+}) satisfies Predicate<CliProviderPreset>;
+
+const isProviderPresetInput = is.UnionOf([
+  isApiProviderPresetInput,
+  isCliProviderPresetInput,
+]) as Predicate<ProviderPreset>;
+
+const isChatPresetInput = is.ObjectOf({
+  split: as.Optional(isChatSplitValue),
+  split_ratio: as.Optional(is.Number),
+}) satisfies Predicate<ChatPreset>;
+
 const isProviderDefinitionInput = is.ObjectOf({
   model: as.Optional(is.String),
   args: as.Optional(is.UnionOf([isJsonRecord, isStringArray])),
@@ -56,9 +114,10 @@ const isTemplateMetadataInput = is.ObjectOf({
   title: as.Optional(is.String),
   desc: as.Optional(is.String),
   default_out: as.Optional(is.String),
-  default_provider: as.Optional(is.String),
+  default_provider: as.Optional(isProviderPresetInput),
   default_model: as.Optional(is.String),
   default_request_args_json: as.Optional(isJsonRecord),
+  default_chat: as.Optional(isChatPresetInput),
   follow_up: as.Optional(
     is.UnionOf([
       is.Boolean,
@@ -124,7 +183,15 @@ function normalizeTemplates(value: unknown): TemplateMetadata[] {
     if (!isTemplateMetadataInput(entry)) {
       throw new Error(`aitrans: template[${index}] has invalid fields`);
     }
-    return { ...entry };
+    return {
+      ...entry,
+      default_provider: entry.default_provider
+        ? normalizeProviderPreset(entry.default_provider)
+        : undefined,
+      default_chat: entry.default_chat
+        ? normalizeChatPreset(entry.default_chat)
+        : undefined,
+    };
   });
 }
 
@@ -136,4 +203,37 @@ function normalizeLooseObject(value: unknown): Record<string, unknown> {
     throw new Error("aitrans: configuration sections must be dictionaries");
   }
   return value as Record<string, unknown>;
+}
+
+export function normalizeProviderPreset(
+  input: ProviderPreset | unknown,
+): ProviderPreset {
+  if (isApiProviderPresetInput(input)) {
+    return {
+      name: input.name,
+      model: input.model,
+      args: input.args ? { ...input.args } : undefined,
+    };
+  }
+  if (isCliProviderPresetInput(input)) {
+    return {
+      name: input.name,
+      cli_args: input.cli_args ? [...input.cli_args] : undefined,
+    };
+  }
+  throw new Error("aitrans: provider preset is invalid");
+}
+
+export function normalizeChatPreset(input: ChatPreset | unknown): ChatPreset {
+  if (!isChatPresetInput(input)) {
+    throw new Error("aitrans: chat preset is invalid");
+  }
+  const preset: ChatPreset = {};
+  if (input.split === "vertical" || input.split === "tab") {
+    preset.split = input.split;
+  }
+  if (typeof input.split_ratio === "number" && Number.isFinite(input.split_ratio)) {
+    preset.split_ratio = input.split_ratio;
+  }
+  return preset;
 }

@@ -12,9 +12,8 @@ import {
 } from "../store/chat.ts";
 import { dispatch, store } from "../store/index.ts";
 
-type SplitMode = "vertical" | "horizontal";
-type SplitInput = SplitMode | "tab" | "float";
-type SplitKind = "vertical" | "horizontal" | "tab";
+type SplitInput = "vertical" | "tab";
+type SplitKind = "vertical" | "tab";
 type RangeTuple = [number, number];
 
 type ChatOpenOptions = {
@@ -38,9 +37,7 @@ type FollowUpItem = ChatSessionState["followups"][number];
 
 const isSplitInput: Predicate<SplitInput> = (
   value: unknown,
-): value is SplitInput =>
-  value === "vertical" || value === "horizontal" || value === "tab" ||
-  value === "float";
+): value is SplitInput => value === "vertical" || value === "tab";
 const isRangeTuple = is.TupleOf([is.Number, is.Number]) satisfies Predicate<
   RangeTuple
 >;
@@ -305,14 +302,16 @@ function ensureChatOpenOptions(payload: unknown): ChatOpenOptions {
   const runtimeSplitRatio = typeof runtime?.chat?.split_ratio === "number"
     ? runtime.chat.split_ratio
     : undefined;
+  const runtimeSplit = runtime?.chat?.split === "tab" ? "tab" : "vertical";
   const configuredRatio = clampSplitRatio(runtimeSplitRatio);
   if (!isChatOpenPayload(payload)) {
-    return { split_ratio: configuredRatio };
+    return { split_ratio: configuredRatio, split: runtimeSplit };
   }
+  const split = payload.split ?? runtimeSplit;
   const ratio = clampSplitRatio(
     payload.split_ratio ?? runtimeSplitRatio ?? configuredRatio,
   );
-  return { ...payload, split_ratio: ratio };
+  return { ...payload, split, split_ratio: ratio };
 }
 
 function ensureFollowUpIndex(payload: unknown): number | null {
@@ -338,9 +337,6 @@ async function createChatSession(
 }
 
 function resolveSplitKind(input?: SplitInput): SplitKind {
-  if (input === "horizontal") {
-    return "horizontal";
-  }
   if (input === "tab") {
     return "tab";
   }
@@ -435,14 +431,12 @@ async function createTabChatSession(
 
 async function createSplitChatSession(
   denops: Denops,
-  kind: "vertical" | "horizontal",
   opts: ChatOpenOptions,
   originWinid: number,
 ): Promise<ChatSessionState> {
   const tabnr = await fn.tabpagenr(denops) as number;
   const { responseWinid, promptWinid } = await openSplitWindows(
     denops,
-    kind,
     opts,
     originWinid,
   );
@@ -472,32 +466,22 @@ async function createSplitChatSession(
 
 async function openSplitWindows(
   denops: Denops,
-  kind: "vertical" | "horizontal",
   opts: ChatOpenOptions,
   originWinid?: number,
 ): Promise<{ responseWinid: number; promptWinid: number }> {
   const baseWinid = await resolveOriginWindow(denops, originWinid);
   await fn.win_gotoid(denops, baseWinid);
   const ratio = clampSplitRatio(opts.split_ratio);
-  if (kind === "vertical") {
-    const beforeVsplit = await snapshotWindows(denops);
-    await denops.cmd("noautocmd keepalt botright vsplit");
-    const responseWinid = await detectNewWindow(denops, beforeVsplit) ??
-      await fn.win_getid(denops) as number;
-    const columns = await denops.call("eval", "&columns") as number;
-    const width = Math.max(40, Math.floor(columns * 0.42));
-    await denops.cmd(`noautocmd vertical resize ${width}`);
-    await fn.win_gotoid(denops, responseWinid);
-    const beforeSplit = await snapshotWindows(denops);
-    await denops.cmd("noautocmd keepalt belowright split");
-    const promptWinid = await detectNewWindow(denops, beforeSplit) ??
-      await fn.win_getid(denops) as number;
-    await balanceStackHeights(denops, responseWinid, promptWinid, ratio);
-    return { responseWinid, promptWinid };
-  }
-  const responseWinid = baseWinid;
+  const beforeVsplit = await snapshotWindows(denops);
+  await denops.cmd("noautocmd keepalt botright vsplit");
+  const responseWinid = await detectNewWindow(denops, beforeVsplit) ??
+    await fn.win_getid(denops) as number;
+  const columns = await denops.call("eval", "&columns") as number;
+  const width = Math.max(40, Math.floor(columns * 0.42));
+  await denops.cmd(`noautocmd vertical resize ${width}`);
+  await fn.win_gotoid(denops, responseWinid);
   const beforeSplit = await snapshotWindows(denops);
-  await denops.cmd("noautocmd keepalt botright split");
+  await denops.cmd("noautocmd keepalt belowright split");
   const promptWinid = await detectNewWindow(denops, beforeSplit) ??
     await fn.win_getid(denops) as number;
   await balanceStackHeights(denops, responseWinid, promptWinid, ratio);

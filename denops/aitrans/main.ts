@@ -10,8 +10,14 @@ import {
 } from "./core/apply_options.ts";
 import {
   ensureConfig,
+  normalizeChatPreset,
+  normalizeProviderPreset,
+  type ApiProviderPreset,
+  type ChatPreset,
+  type CliProviderPreset,
   type FollowUpConfig,
   type ProviderDefinition,
+  type ProviderPreset,
   type RuntimeConfig,
   type TemplateMetadata,
 } from "./core/config.ts";
@@ -81,11 +87,14 @@ type JobOutputSession = OutputSession | ChatOutputSession;
 
 type ExecutionPlan = {
   provider: Provider;
+  providerPreset: ProviderPreset;
   model?: string;
   out: OutputMode;
   register: string;
   requestArgs: Record<string, unknown>;
   followUp: boolean;
+  chat: ChatPreset;
+  cliArgsOverride?: string[];
 };
 
 type ComposeSessionSummary = {
@@ -171,13 +180,14 @@ type ApplyCallOptions = ContextOptions & {
   template?: string;
   prompt_override?: string;
   system_override?: string;
-  provider?: string;
+  provider?: ProviderPreset;
   model?: string;
   out?: string;
   register?: string;
   args?: Record<string, unknown>;
   request_args_json?: Record<string, unknown>;
   follow_up?: boolean;
+  chat?: ChatPreset;
 };
 
 async function handleApplyRequest(
@@ -271,10 +281,11 @@ async function handleComposeOpen(
     },
     callOpts: {
       ...callOpts,
-      provider: execution.provider,
+      provider: execution.providerPreset,
       model: execution.model,
       out: execution.out,
       request_args_json: execution.requestArgs,
+      chat: execution.chat,
     },
     systemPrompt: prompt.system,
     config,
@@ -398,6 +409,7 @@ function startApplyJob(
       controller,
       runtime,
       denops,
+      cliArgsOverride: executionPlan.cliArgsOverride,
     })
     : buildApiIterator({
       provider: options.provider,
@@ -463,6 +475,7 @@ type CliIteratorArgs = {
   controller: AbortController;
   runtime: RuntimeConfig;
   denops: Denops;
+  cliArgsOverride?: string[];
 };
 
 function buildCliIterator(
@@ -472,7 +485,8 @@ function buildCliIterator(
       args.providerDef.command.length > 0
     ? args.providerDef.command
     : defaultCliCommand(args.provider);
-  const baseArgs = resolveCliArgs(args.providerDef);
+  const baseArgs = args.cliArgsOverride ??
+    resolveCliArgs(args.providerDef);
   const chatContext = args.options.out === "chat"
     ? getActiveProviderContext()
     : null;
@@ -643,11 +657,19 @@ function ensureApplyCallOptions(payload: unknown): ApplyCallOptions {
   if (!is.Record(payload)) {
     return {};
   }
+  let providerPreset: ProviderPreset | undefined;
+  if (payload.provider !== undefined) {
+    providerPreset = normalizeProviderPreset(payload.provider);
+  }
+  let chatPreset: ChatPreset | undefined;
+  if (payload.chat !== undefined) {
+    chatPreset = normalizeChatPreset(payload.chat);
+  }
   return {
     template: asOptionalString(payload.template),
     prompt_override: asOptionalString(payload.prompt_override),
     system_override: asOptionalString(payload.system_override),
-    provider: asOptionalString(payload.provider),
+    provider: providerPreset,
     model: asOptionalString(payload.model),
     out: asOptionalString(payload.out),
     selection: asOptionalString(payload.selection),
@@ -665,6 +687,7 @@ function ensureApplyCallOptions(payload: unknown): ApplyCallOptions {
     follow_up: typeof payload.follow_up === "boolean"
       ? payload.follow_up
       : undefined,
+    chat: chatPreset,
   };
 }
 
@@ -726,17 +749,20 @@ function resolveExecutionPlan(
   template: TemplateMetadata | null,
   runtime: RuntimeConfig,
 ): ExecutionPlan {
-  const provider = normalizeProvider(
-    opts.provider ?? template?.default_provider ?? firstProvider(runtime) ??
-      "openai",
-  );
+  const providerPreset = resolveProviderPreset(runtime, template, opts);
+  const provider = providerPreset.name;
   const out = normalizeOut(opts.out ?? template?.default_out ?? "scratch");
-  const requestArgs = deepMerge(
-    template?.default_request_args_json ?? {},
+  const providerDef = runtime.providers?.[provider] ?? {};
+  const templateArgs = template?.default_request_args_json ?? {};
+  const presetArgs = getProviderPresetArgs(providerPreset);
+  const mergedArgs = deepMerge(
+    deepMerge(templateArgs, presetArgs),
     opts.request_args_json ?? {},
   );
-  const model = opts.model ?? template?.default_model ??
-    runtime.providers?.[provider]?.model;
+  const requestArgs = mergeProviderRequestArgs(providerDef, mergedArgs);
+  const presetModel = getProviderPresetModel(providerPreset);
+  const model = opts.model ?? presetModel ?? template?.default_model ??
+    providerDef.model;
   const register = opts.register ??
     asOptionalString(runtime.globals?.register) ?? '"';
   let followUpConfig: FollowUpConfig | null = null;
@@ -748,7 +774,19 @@ function resolveExecutionPlan(
   const followUp = typeof opts.follow_up === "boolean"
     ? opts.follow_up
     : (followUpConfig?.enabled === true);
-  return { provider, model, out, requestArgs, register, followUp };
+  const chat = resolveChatPreset(runtime, template, opts);
+  const cliArgsOverride = getCliArgsOverride(providerPreset);
+  return {
+    provider,
+    providerPreset,
+    model,
+    out,
+    requestArgs,
+    register,
+    followUp,
+    chat,
+    cliArgsOverride,
+  };
 }
 
 function normalizeProvider(value: string): Provider {
@@ -777,6 +815,123 @@ function normalizeOut(value: string | undefined): OutputMode {
 function firstProvider(runtime: RuntimeConfig): string | undefined {
   const entries = Object.keys(runtime.providers ?? {});
   return entries[0];
+}
+
+function resolveProviderPreset(
+  runtime: RuntimeConfig,
+  template: TemplateMetadata | null,
+  opts: ApplyCallOptions,
+): ProviderPreset {
+  if (opts.provider) {
+    return normalizeProviderPreset(opts.provider);
+  }
+  if (template?.default_provider) {
+    return normalizeProviderPreset(template.default_provider);
+  }
+  const fallback = firstProvider(runtime);
+  if (fallback) {
+    return createFallbackProviderPreset(fallback);
+  }
+  throw new Error("aitrans: no providers are configured");
+}
+
+function createFallbackProviderPreset(name: string): ProviderPreset {
+  const normalized = normalizeProvider(name);
+  if (isCliProviderName(normalized)) {
+    return { name: normalized };
+  }
+  return { name: normalized };
+}
+
+function getProviderPresetArgs(
+  preset: ProviderPreset,
+): Record<string, unknown> {
+  if (isApiProviderPreset(preset) && preset.args) {
+    return { ...preset.args };
+  }
+  return {};
+}
+
+function resolveChatPreset(
+  runtime: RuntimeConfig,
+  template: TemplateMetadata | null,
+  opts: ApplyCallOptions,
+): ChatPreset {
+  const merged: ChatPreset = {};
+  const sources = [
+    runtimeChatPreset(runtime),
+    template?.default_chat,
+    opts.chat,
+  ];
+  for (const candidate of sources) {
+    if (!candidate) continue;
+    const normalized = normalizeChatPreset(candidate);
+    if (normalized.split) {
+      merged.split = normalized.split;
+    }
+    if (
+      typeof normalized.split_ratio === "number" &&
+      Number.isFinite(normalized.split_ratio)
+    ) {
+      merged.split_ratio = normalized.split_ratio;
+    }
+  }
+  if (!merged.split) {
+    merged.split = "vertical";
+  }
+  return merged;
+}
+
+function runtimeChatPreset(runtime: RuntimeConfig): ChatPreset | undefined {
+  const chatConfig = runtime.chat ?? {};
+  const splitValue = typeof chatConfig["split"] === "string"
+    ? chatConfig["split"]
+    : undefined;
+  const ratioValue = typeof chatConfig["split_ratio"] === "number"
+    ? chatConfig["split_ratio"]
+    : undefined;
+  if (
+    (splitValue === "vertical" || splitValue === "tab") ||
+    typeof ratioValue === "number"
+  ) {
+    return normalizeChatPreset({
+      split: splitValue as "vertical" | "tab" | undefined,
+      split_ratio: ratioValue,
+    });
+  }
+  return undefined;
+}
+
+function isCliProviderName(name: Provider | string): name is CliProvider {
+  return name === "codex-cli" || name === "claude-cli";
+}
+
+function isApiProviderPreset(
+  preset: ProviderPreset,
+): preset is ApiProviderPreset {
+  return preset.name === "openai" || preset.name === "claude" ||
+    preset.name === "gemini";
+}
+
+function isCliProviderPreset(
+  preset: ProviderPreset,
+): preset is CliProviderPreset {
+  return preset.name === "codex-cli" || preset.name === "claude-cli";
+}
+
+function getProviderPresetModel(
+  preset: ProviderPreset,
+): string | undefined {
+  return isApiProviderPreset(preset) ? preset.model : undefined;
+}
+
+function getCliArgsOverride(
+  preset: ProviderPreset,
+): string[] | undefined {
+  if (isCliProviderPreset(preset) && preset.cli_args) {
+    return preset.cli_args.map((entry) => String(entry));
+  }
+  return undefined;
 }
 
 function deepMerge(
@@ -936,6 +1091,8 @@ async function createSessionForOutput(
         selection_lines: ctx.selection_lines,
         range: [ctx.start_pos.row, ctx.end_pos.row],
         source_bufnr: ctx.bufnr,
+        split: plan.chat.split,
+        split_ratio: plan.chat.split_ratio,
       });
     }
     await ensureChatPromptLogged(denops, options.prompt);
