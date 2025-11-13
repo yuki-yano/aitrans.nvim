@@ -45,6 +45,7 @@ export async function* executeCliProvider(
       stderr: "piped",
       env: options.env,
     }).spawn();
+    child.stdin?.close();
   } catch (_err) {
     if (_err instanceof Deno.errors.NotFound) {
       throw new Error(

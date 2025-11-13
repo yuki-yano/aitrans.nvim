@@ -498,6 +498,13 @@ function buildCliIterator(
     payload,
     context: chatContext,
   });
+  if (debugEnabled) {
+    void logDebug("aitrans.cli.command", {
+      provider: args.provider,
+      command,
+      args: cliArgs,
+    });
+  }
   const hooks = args.options.out === "chat"
     ? {
       onThreadStarted: (threadId: string) => {
@@ -809,10 +816,15 @@ function buildCliPayload(
   options: ApplyOptions,
   requestArgs: Record<string, unknown>,
 ): CliPayload {
+  const history = [...(options.chat_history ?? [])];
+  const last = history.at(-1);
+  if (last && last.role === "user" && last.content === options.prompt) {
+    history.pop();
+  }
   return {
     system: options.system,
     prompt: options.prompt,
-    chat_history: options.chat_history ?? [],
+    chat_history: history,
     request: requestArgs,
   };
 }
@@ -838,13 +850,17 @@ function buildCliCommandArgs(input: BuildCliArgsInput): string[] {
       args.push("resume", input.context.thread_id);
     }
     return args;
+  } else if (input.provider === "claude-cli") {
+    const prompt = buildClaudePrompt(input.payload);
+    args.push("--output-format", "json");
+    args.push("--print", prompt);
+    if (input.context?.session_id) {
+      args.push("--resume", input.context.session_id);
+    }
+    return args;
+  } else {
+    throw new Error("aitrans: invalid CLI provider");
   }
-  const prompt = buildClaudePrompt(input.payload);
-  if (input.context?.session_id) {
-    args.push("--resume", input.context.session_id);
-  }
-  args.push(prompt);
-  return args;
 }
 
 function buildClaudePrompt(payload: CliPayload): string {

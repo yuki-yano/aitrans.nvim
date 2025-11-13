@@ -68,7 +68,7 @@ Call `denops#plugin#load('aitrans', {})` (or let your manager do it) after the g
   - aitrans always builds `codex exec --json '<payload>'` and, when a `thread_id` is known, appends `resume <thread_id>` automatically.
   - Provider config `cli_args` is inserted immediately after the `codex` binary, so you only specify additional flags (e.g. `{ '--timeout', '30' }`) while aitrans takes care of payload/resume placement.
 - **Claude CLI**
-  - aitrans generates `claude <cli_args...> '<prompt>'` and injects `--resume <session_id>` for subsequent turns automatically. The prompt body contains system + chat history + current message, so multi-turn chats keep context without user intervention.
+  - aitrans generates `claude <cli_args...> --output-format json --print '<prompt>'` and injects `--resume <session_id>` for subsequent turns automatically. The prompt body contains system + chat history + current message, so multi-turn chats stay contextual even without manual flag management.
 - Provider context (thread/session IDs) is stored in Redux and in saved chat logs, so `aitrans#chat#resume()` / `aitrans#chat#save()` / `aitrans#chat#load()` restores CLI sessions without extra input.
 - CLI output is parsed line-by-line as JSON. Lines that fail to parse are appended verbatim to the `## Assistant` block, giving you direct access to CLI warnings/errors.
 - Set `g:aitrans_debug = v:true` to log every CLI event (`[aitrans.cli.event] ...`) via `:messages`.
