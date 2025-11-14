@@ -35,3 +35,13 @@ export function normalizeFollowUps(payload: unknown): FollowUpEntry[] {
 function clampKey(value: number): number {
   return Math.max(1, Math.min(4, Math.trunc(value)));
 }
+
+export function resolveFollowUpIndex(payload: unknown): number | null {
+  if (is.Record(payload) && is.Number(payload.index)) {
+    return Math.trunc(payload.index);
+  }
+  if (typeof payload === "number") {
+    return Math.trunc(payload);
+  }
+  return null;
+}

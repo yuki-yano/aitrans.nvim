@@ -1,7 +1,7 @@
 {
   "lock": false,
   "fmt": {
-    "exclude": ["**/*.md", "**/*.json"]
+    "exclude": ["**/*.md", "**/*.json", ".kiro/**", "coverage/**"]
   },
   "tasks": {
     "format": "deno fmt",
