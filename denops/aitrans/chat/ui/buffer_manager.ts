@@ -183,6 +183,52 @@ export async function resolveSelectionLines(
   return lines;
 }
 
+export async function capturePromptInput(
+  denops: Denops,
+  session: ChatSessionState,
+): Promise<string | null> {
+  const { prompt, headerLines } = session;
+  await fn.win_gotoid(denops, prompt.winid);
+  const lines = await fn.getbufline(
+    denops,
+    prompt.bufnr,
+    headerLines + 1,
+    "$",
+  ) as string[];
+  const text = lines.join("\n").trim();
+  if (text.length === 0) {
+    return null;
+  }
+  await buffer.modifiable(denops, prompt.bufnr, async () => {
+    await fn.deletebufline(denops, prompt.bufnr, headerLines + 1, "$");
+    await fn.appendbufline(denops, prompt.bufnr, headerLines, [""]);
+  });
+  await fn.win_gotoid(denops, prompt.winid);
+  await fn.win_execute(denops, prompt.winid, `normal! ${headerLines + 1}G0`);
+  return text;
+}
+
+export async function applyFollowUpText(
+  denops: Denops,
+  session: ChatSessionState,
+  text: string,
+): Promise<void> {
+  await buffer.modifiable(denops, session.prompt.bufnr, async () => {
+    await fn.setbufline(
+      denops,
+      session.prompt.bufnr,
+      session.headerLines + 1,
+      text.split("\n"),
+    );
+  });
+  await fn.win_gotoid(denops, session.prompt.winid);
+  await fn.win_execute(
+    denops,
+    session.prompt.winid,
+    `normal! ${session.headerLines + 1}G0`,
+  );
+}
+
 export async function appendLinesToResponse(
   denops: Denops,
   session: ChatSessionState,

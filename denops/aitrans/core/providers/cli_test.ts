@@ -45,3 +45,25 @@ Deno.test("mapClaudeResult emits chunk and reports session id", () => {
     usage_partial: { input: 5, output: 2 },
   });
 });
+
+Deno.test("mapCodexEvent triggers hooks and handles unknown events", () => {
+  let threadId: string | undefined;
+  const hooks: CliProviderHooks = {
+    onThreadStarted: (id) => (threadId = id),
+  };
+  const startChunk = mapCodexEvent({
+    type: "thread.started",
+    thread_id: "thread-123",
+  }, hooks);
+  assertEquals(threadId, "thread-123");
+  assertEquals(startChunk, {
+    raw: { type: "thread.started", thread_id: "thread-123" },
+  });
+  const fallback = mapCodexEvent({ type: "unknown" });
+  assertEquals(fallback, { raw: { type: "unknown" } });
+});
+
+Deno.test("mapClaudeResult handles missing usage and session id", () => {
+  const chunk = mapClaudeResult({ type: "result" });
+  assertEquals(chunk, { done: true, raw: { type: "result" } });
+});
